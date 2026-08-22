@@ -1,0 +1,5 @@
+node_modules/
+.playwright-mcp/
+# Per-user state written by the app
+config.json
+policies.json

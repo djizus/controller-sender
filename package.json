@@ -1,0 +1,18 @@
+{
+  "name": "controller-sender",
+  "private": true,
+  "description": "Local webapp to send ERC20 tokens from a Cartridge Controller to any Starknet address",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "start": "tsx server.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^7.0.2"
+  }
+}

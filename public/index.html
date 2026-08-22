@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Controller Sender</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">⌁</span>
+      <h1>Controller Sender</h1>
+      <span class="badge net">MAINNET</span>
+    </div>
+    <div class="identity">
+      <span id="username" class="pill" hidden></span>
+      <button id="address" class="pill mono" title="Click to copy" hidden></button>
+      <span id="session-pill" class="pill session off">checking…</span>
+    </div>
+  </header>
+
+  <div id="auth-banner" class="banner" hidden>
+    <div>
+      <strong>Session authorization needed</strong>
+      <p id="auth-message">This app uses its own Cartridge session with <code>transfer</code> permission
+        on the tokens you hold. Your game session is not touched. Re-authorize after adding a token.</p>
+      <p id="auth-link-row" hidden>
+        <a id="auth-link" href="#" target="_blank" rel="noopener">Open Cartridge to approve ↗</a>
+        <span class="spinner"></span> waiting for approval. The CLI locks the username to this account.
+        Wait for it to appear, then log in with your passkey. If it stays empty, reload the popup.
+      </p>
+    </div>
+    <button id="auth-btn" class="primary">Authorize session</button>
+  </div>
+
+  <main>
+    <section class="card" id="balances-card">
+      <div class="card-head">
+        <h2>Balances</h2>
+        <div class="row-right">
+          <span id="total-usd" class="muted"></span>
+          <button id="refresh-btn" class="ghost" title="Refresh">⟳</button>
+        </div>
+      </div>
+      <div id="balances" class="token-list">
+        <p class="muted">Loading…</p>
+      </div>
+      <form id="add-token-form" class="inline-form">
+        <input id="add-token-address" placeholder="Add token by address (0x…)" spellcheck="false" />
+        <button class="ghost" type="submit">Add</button>
+      </form>
+    </section>
+
+    <section class="card" id="send-card">
+      <div class="card-head"><h2>Send</h2></div>
+      <form id="send-form">
+        <label>Token
+          <select id="token-select"></select>
+        </label>
+        <label>Amount
+          <div class="amount-row">
+            <input id="amount" placeholder="0.0" inputmode="decimal" autocomplete="off" spellcheck="false" required />
+            <button type="button" id="max-btn" class="ghost">MAX</button>
+          </div>
+          <span id="amount-usd" class="muted small"></span>
+        </label>
+        <label>Recipient
+          <input id="recipient" placeholder="0x… or @username" autocomplete="off" spellcheck="false" required />
+          <span id="recipient-hint" class="muted small"></span>
+        </label>
+        <button type="submit" class="primary" id="send-btn">Send</button>
+      </form>
+
+      <details id="settings">
+        <summary>Settings</summary>
+        <form id="settings-form" class="inline-form">
+          <input id="default-recipient" placeholder="Default recipient (your Ready wallet 0x…)" spellcheck="false" />
+          <button class="ghost" type="submit">Save</button>
+        </form>
+      </details>
+    </section>
+  </main>
+
+  <dialog id="confirm-modal">
+    <h3>Confirm transfer</h3>
+    <dl>
+      <dt>Token</dt><dd id="c-token"></dd>
+      <dt>Amount</dt><dd id="c-amount"></dd>
+      <dt>Recipient</dt><dd id="c-recipient" class="mono"></dd>
+    </dl>
+    <div class="modal-actions">
+      <button id="c-cancel" class="ghost">Cancel</button>
+      <button id="c-confirm" class="primary">Confirm &amp; send</button>
+    </div>
+  </dialog>
+
+  <div id="toasts"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
