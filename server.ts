@@ -1,6 +1,7 @@
-// Controller Sender: local webapp to send ERC20 tokens from a Cartridge Controller.
-// Wraps the `controller` CLI (session auth / execute) and queries balances via
-// batched starknet_call JSON-RPC. Binds to localhost only.
+// Controller Sender: local webapp to send ERC20 tokens and ERC721 NFTs from a
+// Cartridge Controller. Wraps the `controller` CLI (session auth / execute) and
+// queries balances and ownership via batched starknet_call JSON-RPC. Binds to
+// localhost only.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -15,6 +16,7 @@ import {
   normalizeAddress,
   type TokenInfo,
 } from "./tokens.ts";
+import { getNftCandidates } from "./nfts.ts";
 
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_DIR = join(APP_DIR, "public");
@@ -33,6 +35,9 @@ const SELECTOR = {
   decimals: "0x4c4fb1ab068f6039d5780c68dd0fa2f8742cceb3426d19667778ca7f3518a9",
   symbol: "0x216b05c387bab9ac31918a3e61672f4618601f3c598a2f3f2710f37053e1ea4",
   name: "0x361458367e696363fbcc70777d07ebbd2394e89fd0adcaf147faccd1d294d60",
+  ownerOf: "0x3552df12bdc6089cf963c40c4cf56fbfd4bd14680c244d1c5494c2790f1ea5c", // owner_of
+  tokenUri: "0x226ad7e84c1fe08eb4c525ed93cccadf9517670341304571e66f7c4f95cbe54", // token_uri
+  tokenURI: "0x12a7823b0c6bee58f8c694888f32f862c6584caa8afa0242de046d298ba684d", // legacy camelCase
 };
 
 const FELT_PRIME = 2n ** 251n + 17n * 2n ** 192n + 1n;
@@ -180,17 +185,24 @@ interface SenderSession {
   address: string;
   expiresAt: number;
   expiresFormatted: string;
-  transferContracts: string[];
+  policies: Map<string, Set<string>>; // contract -> allowed entrypoints
 }
 
-function extractTransferContracts(policies: string[]): string[] {
-  const contracts = new Set<string>();
+// The CLI reports policies as "<contract>:<entrypoint>" strings.
+function parsePolicies(policies: string[]): Map<string, Set<string>> {
+  const byContract = new Map<string, Set<string>>();
   for (const p of policies) {
     const idx = p.lastIndexOf(":");
     if (idx <= 0) continue;
-    if (p.slice(idx + 1) === "transfer") contracts.add(normalizeAddress(p.slice(0, idx)));
+    const contract = normalizeAddress(p.slice(0, idx));
+    if (!byContract.has(contract)) byContract.set(contract, new Set());
+    byContract.get(contract)!.add(p.slice(idx + 1));
   }
-  return [...contracts];
+  return byContract;
+}
+
+function sessionAllows(session: SenderSession | null, contract: string, entrypoint: string): boolean {
+  return session?.policies.get(contract)?.has(entrypoint) ?? false;
 }
 
 async function getSenderSession(): Promise<SenderSession | null> {
@@ -201,7 +213,7 @@ async function getSenderSession(): Promise<SenderSession | null> {
     address: normalizeAddress(s.address),
     expiresAt: s.expires_at,
     expiresFormatted: s.expires_at_formatted ?? "",
-    transferContracts: extractTransferContracts(s.policies ?? []),
+    policies: parsePolicies(s.policies ?? []),
   };
 }
 
@@ -241,44 +253,40 @@ function rpcRequest(call: RawCall, id: number) {
   };
 }
 
+// Batches of 200 calls run in parallel. An NFT-heavy controller needs a couple
+// of thousand owner_of calls per refresh, which one batch would serialize.
 async function rpcCalls(calls: RawCall[]): Promise<(string[] | null)[]> {
-  if (calls.length === 0) return [];
-  try {
-    const res = await fetch(RPC_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(calls.map((c, i) => rpcRequest(c, i))),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const body = await res.json();
-    if (Array.isArray(body)) {
-      const byId = new Map(body.map((r: any) => [r.id, r]));
-      return calls.map((_, i) => byId.get(i)?.result ?? null);
-    }
-  } catch {
-    // fall through to individual requests
-  }
   const out: (string[] | null)[] = new Array(calls.length).fill(null);
-  const CHUNK = 20;
-  for (let i = 0; i < calls.length; i += CHUNK) {
-    await Promise.all(
-      calls.slice(i, i + CHUNK).map(async (c, j) => {
-        try {
-          const res = await fetch(RPC_URL, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(rpcRequest(c, 0)),
-            signal: AbortSignal.timeout(15_000),
-          });
-          const body: any = await res.json();
-          out[i + j] = body.result ?? null;
-        } catch {
-          out[i + j] = null;
+  const BATCH = 200;
+  const starts: number[] = [];
+  for (let i = 0; i < calls.length; i += BATCH) starts.push(i);
+  await Promise.all(
+    starts.map(async (start) => {
+      const chunk = calls.slice(start, start + BATCH);
+      try {
+        const res = await fetch(RPC_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(chunk.map((c, j) => rpcRequest(c, start + j))),
+          signal: AbortSignal.timeout(30_000),
+        });
+        const body = await res.json();
+        if (!Array.isArray(body)) return;
+        for (const r of body) {
+          if (Number.isInteger(r?.id) && r.id >= start && r.id < start + chunk.length) {
+            out[r.id] = r.result ?? null;
+          }
         }
-      }),
-    );
-  }
+      } catch {
+        // leave the chunk as nulls
+      }
+    }),
+  );
   return out;
+}
+
+function u256Calldata(value: bigint): string[] {
+  return [`0x${(value & ((1n << 128n) - 1n)).toString(16)}`, `0x${(value >> 128n).toString(16)}`];
 }
 
 function u256FromResult(result: string[] | null): bigint | null {
@@ -298,7 +306,8 @@ function feltToString(value: bigint): string {
   return Buffer.from(hex, "hex").toString("utf8").replace(/\0/g, "");
 }
 
-// Handles both Cairo0 short strings (single felt) and Cairo1 ByteArray results.
+// Handles Cairo0 short strings (single felt), Cairo0 felt arrays (length-prefixed)
+// and Cairo1 ByteArray results.
 function decodeStringResult(result: string[] | null): string | null {
   if (!result || result.length === 0) return null;
   try {
@@ -309,6 +318,9 @@ function decodeStringResult(result: string[] | null): string | null {
       for (let i = 1; i <= words; i++) s += feltToString(BigInt(result[i]));
       if (Number(BigInt(result[words + 2])) > 0) s += feltToString(BigInt(result[words + 1]));
       return s || null;
+    }
+    if (result.length === words + 1) {
+      return result.slice(1).map((f) => feltToString(BigInt(f))).join("") || null;
     }
     return feltToString(BigInt(result[0])) || null;
   } catch {
@@ -344,6 +356,92 @@ async function getHeldTokens(address: string): Promise<HeldToken[]> {
     if (raw > 0n || t.custom) held.push({ ...t, raw });
   });
   return held;
+}
+
+// ---------------------------------------------------------------------------
+// NFTs
+
+interface HeldNft {
+  address: string; // collection contract
+  tokenId: bigint;
+  symbol: string;
+  name: string;
+}
+
+function shortAddress(address: string): string {
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+// Candidates come from the transfer index; owner_of decides what is still held.
+// Sorted by contract, then token id.
+async function getHeldNfts(address: string): Promise<HeldNft[]> {
+  const candidates = await getNftCandidates(address);
+  const owners = await rpcCalls(
+    candidates.map((c) => ({ to: c.address, selector: SELECTOR.ownerOf, calldata: u256Calldata(c.tokenId) })),
+  );
+  const held: HeldNft[] = [];
+  candidates.forEach((c, i) => {
+    const owner = owners[i]?.[0];
+    if (!owner || normalizeAddress(owner) !== address) return;
+    held.push({
+      address: c.address,
+      tokenId: c.tokenId,
+      symbol: c.symbol ?? shortAddress(c.address),
+      name: c.name ?? "Unknown collection",
+    });
+  });
+  return held.sort(
+    (a, b) => a.address.localeCompare(b.address) || (a.tokenId < b.tokenId ? -1 : a.tokenId > b.tokenId ? 1 : 0),
+  );
+}
+
+// Discovery depends on a third-party index, so a failure there must not take
+// the token list down with it.
+async function tryGetHeldNfts(address: string): Promise<{ nfts: HeldNft[]; error: string | null }> {
+  try {
+    return { nfts: await getHeldNfts(address), error: null };
+  } catch (err) {
+    console.warn(`NFT discovery failed: ${(err as Error).message}`);
+    return { nfts: [], error: (err as Error).message };
+  }
+}
+
+// A collection is a symbol and name. One collection can span several contracts
+// (seasonal deployments, per-type chests), so each token carries its contract.
+function groupCollections(nfts: HeldNft[], session: SenderSession | null) {
+  const groups = new Map<string, { symbol: string; name: string; tokens: any[] }>();
+  for (const n of nfts) {
+    const key = `${n.symbol}\n${n.name}`;
+    if (!groups.has(key)) groups.set(key, { symbol: n.symbol, name: n.name, tokens: [] });
+    groups.get(key)!.tokens.push({
+      address: n.address,
+      tokenId: n.tokenId.toString(),
+      transferAllowed: sessionAllows(session, n.address, "transfer_from"),
+    });
+  }
+  return [...groups.values()].sort((a, b) => b.tokens.length - a.tokens.length);
+}
+
+// token_uri is often a data: URI with the whole metadata (Cartridge games render
+// the SVG on-chain), so it is served as-is and the browser extracts the image.
+const tokenUriCache = new Map<string, string | null>();
+async function tokenUri(contract: string, tokenId: bigint): Promise<string | null> {
+  const key = `${contract}:${tokenId}`;
+  const hit = tokenUriCache.get(key);
+  if (hit !== undefined) return hit;
+  const calldata = u256Calldata(tokenId);
+  let [result] = await rpcCalls([{ to: contract, selector: SELECTOR.tokenUri, calldata }]);
+  if (!result) [result] = await rpcCalls([{ to: contract, selector: SELECTOR.tokenURI, calldata }]);
+  const uri = decodeStringResult(result)?.trim() || null;
+  tokenUriCache.set(key, uri);
+  return uri;
+}
+
+async function ownerOf(contract: string, tokenId: bigint): Promise<string | null> {
+  const [result] = await rpcCalls([
+    { to: contract, selector: SELECTOR.ownerOf, calldata: u256Calldata(tokenId) },
+  ]);
+  return result?.[0] ? normalizeAddress(result[0]) : null;
 }
 
 function formatUnits(raw: bigint, decimals: number): string {
@@ -385,33 +483,41 @@ let auth: AuthState = { status: "idle", url: null, error: null };
 let authProc: ChildProcess | null = null;
 let authOutput = "";
 
+// One policy per contract: `transfer` for ERC20 tokens, `transfer_from` for NFTs.
 async function writePoliciesFile(): Promise<number> {
   const address = (await getSenderSession())?.address ?? (await lookupControllerAddress());
-  const tokens = await allTokens();
-  const include = new Map<string, TokenInfo>();
+  const tokens = new Map<string, TokenInfo>();
+  const collections = new Map<string, HeldNft>(); // one entry per contract
   if (address) {
-    for (const t of await getHeldTokens(address)) include.set(t.address, t);
+    for (const t of await getHeldTokens(address)) tokens.set(t.address, t);
+    for (const n of (await tryGetHeldNfts(address)).nfts) collections.set(n.address, n);
   }
-  for (const t of tokens) {
-    if (t.custom || t.address === ETH_ADDRESS || t.address === STRK_ADDRESS) {
-      include.set(t.address, t);
-    }
+  for (const t of await allTokens()) {
+    if (t.custom || t.address === ETH_ADDRESS || t.address === STRK_ADDRESS) tokens.set(t.address, t);
   }
   const contracts: Record<string, unknown> = {};
-  for (const t of include.values()) {
+  for (const t of tokens.values()) {
     contracts[t.address] = {
       name: `${t.symbol} Token`,
       methods: [
+        { name: "transfer", entrypoint: "transfer", description: `Transfer ${t.symbol} to another address` },
+      ],
+    };
+  }
+  for (const c of collections.values()) {
+    contracts[c.address] = {
+      name: `${c.symbol} NFT`,
+      methods: [
         {
-          name: "transfer",
-          entrypoint: "transfer",
-          description: `Transfer ${t.symbol} to another address`,
+          name: "transfer_from",
+          entrypoint: "transfer_from",
+          description: `Transfer a ${c.symbol} NFT to another address`,
         },
       ],
     };
   }
   writeFileSync(POLICIES_PATH, JSON.stringify({ contracts }, null, 2));
-  return include.size;
+  return Object.keys(contracts).length;
 }
 
 async function startAuth(): Promise<AuthState> {
@@ -510,8 +616,34 @@ function isTrustedRequest(req: IncomingMessage): boolean {
   return (req.headers["content-type"] ?? "").startsWith("application/json");
 }
 
+// Public IPFS gateways refuse browser requests, so NFT metadata and images on
+// IPFS are fetched here. The host is fixed; a token contract only picks the path.
+const IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
+async function proxyIpfs(path: string, res: ServerResponse): Promise<void> {
+  if (!/^[A-Za-z0-9._~%/-]{1,512}$/.test(path) || path.includes("..")) {
+    res.writeHead(400).end();
+    return;
+  }
+  try {
+    const upstream = await fetch(IPFS_GATEWAY + path, { signal: AbortSignal.timeout(20_000) });
+    const type = upstream.headers.get("content-type") ?? "";
+    const body = Buffer.from(await upstream.arrayBuffer());
+    if (!upstream.ok || !/^(image\/|application\/json|text\/plain)/.test(type) || body.length > 8_000_000) {
+      res.writeHead(502).end();
+      return;
+    }
+    res.writeHead(200, { "content-type": type, "cache-control": "private, max-age=86400" });
+    res.end(body);
+  } catch {
+    res.writeHead(502).end();
+  }
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   if (!isTrustedRequest(req)) return sendJson(res, 403, { error: "Cross-origin request rejected" });
+  if (req.method === "GET" && url.pathname.startsWith("/api/ipfs/")) {
+    return proxyIpfs(url.pathname.slice("/api/ipfs/".length), res);
+  }
   const route = `${req.method} ${url.pathname}`;
 
   switch (route) {
@@ -523,11 +655,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         address,
         username: ACCOUNT,
         session: session
-          ? {
-              expiresAt: session.expiresAt,
-              expiresFormatted: session.expiresFormatted,
-              transferContracts: session.transferContracts,
-            }
+          ? { expiresAt: session.expiresAt, expiresFormatted: session.expiresFormatted }
           : null,
         auth,
         defaultRecipient: config.defaultRecipient,
@@ -542,8 +670,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
           error: "No controller session found. Authorize a session first.",
         });
       }
-      const allowed = new Set(session?.transferContracts ?? []);
-      const held = await getHeldTokens(address);
+      const [held, nfts] = await Promise.all([getHeldTokens(address), tryGetHeldNfts(address)]);
       const tokens = held
         .map((t) => {
           const balance = formatUnits(t.raw, t.decimals);
@@ -558,11 +685,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
             raw: t.raw.toString(),
             balance,
             usd,
-            transferAllowed: allowed.has(t.address),
+            transferAllowed: sessionAllows(session, t.address, "transfer"),
           };
         })
         .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || Number(BigInt(b.raw) - BigInt(a.raw)));
-      return sendJson(res, 200, { address, tokens });
+      return sendJson(res, 200, {
+        address,
+        tokens,
+        collections: groupCollections(nfts.nfts, session),
+        nftError: nfts.error,
+      });
     }
 
     case "POST /api/auth": {
@@ -570,47 +702,71 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return sendJson(res, state.status === "failed" ? 502 : 200, state);
     }
 
+    // Body: { address, recipient, amount } for an ERC20 token, or
+    // { address, recipient, tokenId } for an NFT.
     case "POST /api/transfer": {
       const body = await readBody(req);
-      const tokenAddress = normalizeAddress(String(body.address ?? ""));
+      const contract = normalizeAddress(String(body.address ?? ""));
       const recipientInput = String(body.recipient ?? "").trim();
-      const amountInput = String(body.amount ?? "").trim();
 
       if (!isValidAddress(recipientInput)) {
         return sendJson(res, 400, { error: "Invalid recipient address" });
       }
       const recipient = normalizeAddress(recipientInput);
-      const token = (await allTokens()).find((t) => t.address === tokenAddress);
-      if (!token) return sendJson(res, 400, { error: "Unknown token" });
-
-      let raw: bigint;
-      try {
-        raw = parseAmount(amountInput, token.decimals);
-      } catch (err) {
-        return sendJson(res, 400, { error: (err as Error).message });
-      }
-      if (raw <= 0n) return sendJson(res, 400, { error: "Amount must be greater than zero" });
-
       const session = await getSenderSession();
       if (!session) {
         return sendJson(res, 409, { needsReauth: true, error: "No active sender session" });
       }
-      if (!session.transferContracts.includes(token.address)) {
+
+      let entrypoint: string;
+      let calldata: string;
+      let label: string;
+      if (body.tokenId !== undefined) {
+        let tokenId: bigint;
+        try {
+          tokenId = BigInt(String(body.tokenId));
+        } catch {
+          return sendJson(res, 400, { error: "Invalid token ID" });
+        }
+        if (tokenId < 0n) return sendJson(res, 400, { error: "Invalid token ID" });
+        if ((await ownerOf(contract, tokenId)) !== session.address) {
+          return sendJson(res, 400, { error: "The controller does not own this NFT" });
+        }
+        entrypoint = "transfer_from";
+        calldata = `${session.address},${recipient},u256:${tokenId}`;
+        label = `NFT #${tokenId} of ${contract}`;
+      } else {
+        const amountInput = String(body.amount ?? "").trim();
+        const token = (await allTokens()).find((t) => t.address === contract);
+        if (!token) return sendJson(res, 400, { error: "Unknown token" });
+        let raw: bigint;
+        try {
+          raw = parseAmount(amountInput, token.decimals);
+        } catch (err) {
+          return sendJson(res, 400, { error: (err as Error).message });
+        }
+        if (raw <= 0n) return sendJson(res, 400, { error: "Amount must be greater than zero" });
+        entrypoint = "transfer";
+        calldata = `${recipient},u256:${raw}`;
+        label = `${amountInput} ${token.symbol}`;
+      }
+
+      if (!sessionAllows(session, contract, entrypoint)) {
         return sendJson(res, 409, {
           needsReauth: true,
-          error: `The session has no transfer permission for ${token.symbol}. Re-authorize.`,
+          error: `The session has no ${entrypoint} permission for this contract. Re-authorize.`,
         });
       }
 
       // Always self-pay gas. The paymaster does not subsidize most plain transfers.
       const result = await runController(
-        ["execute", token.address, "transfer", `${recipient},u256:${raw}`,
+        ["execute", contract, entrypoint, calldata,
          "--wait", "--timeout", "120", "--chain-id", CHAIN_ID, "--no-paymaster"],
         { timeoutMs: 180_000 },
       );
       if (result.status !== "success") {
         console.error(
-          `[${new Date().toISOString()}] [transfer FAILED] ${amountInput} ${token.symbol} -> ${recipient}\n`,
+          `[${new Date().toISOString()}] [transfer FAILED] ${label} -> ${recipient}\n`,
           JSON.stringify(result, null, 2),
         );
         return cliError(res, result, "Transfer failed");
@@ -622,9 +778,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         dataStr.match(/0x[0-9a-fA-F]{50,66}/)?.[0] ??
         null;
       console.log(
-        `[${new Date().toISOString()}] [transfer OK] ${amountInput} ${token.symbol} -> ${recipient} tx=${txHash}`,
+        `[${new Date().toISOString()}] [transfer OK] ${label} -> ${recipient} tx=${txHash}`,
       );
       return sendJson(res, 200, { txHash, data: result.data ?? null });
+    }
+
+    case "GET /api/nft-uri": {
+      const contract = url.searchParams.get("address") ?? "";
+      let tokenId: bigint;
+      try {
+        tokenId = BigInt(url.searchParams.get("tokenId") ?? "");
+      } catch {
+        return sendJson(res, 400, { error: "Invalid token ID" });
+      }
+      if (!isValidAddress(contract) || tokenId < 0n) {
+        return sendJson(res, 400, { error: "Invalid collection address or token ID" });
+      }
+      return sendJson(res, 200, { uri: await tokenUri(normalizeAddress(contract), tokenId) });
     }
 
     case "GET /api/lookup": {

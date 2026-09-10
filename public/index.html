@@ -24,7 +24,8 @@
     <div>
       <strong>Session authorization needed</strong>
       <p id="auth-message">This app uses its own Cartridge session with <code>transfer</code> permission
-        on the tokens you hold. Your game session is not touched. Re-authorize after adding a token.</p>
+        on the tokens you hold and <code>transfer_from</code> on your NFT collections. Your game session
+        is not touched. Re-authorize after adding a token or receiving an NFT from a new collection.</p>
       <p id="auth-link-row" hidden>
         <a id="auth-link" href="#" target="_blank" rel="noopener">Open Cartridge to approve ↗</a>
         <span class="spinner"></span> waiting for approval. The CLI locks the username to this account.
@@ -50,20 +51,28 @@
         <input id="add-token-address" placeholder="Add token by address (0x…)" spellcheck="false" />
         <button class="ghost" type="submit">Add</button>
       </form>
+      <div class="card-head sub"><h2>NFTs</h2></div>
+      <div id="nfts" class="token-list">
+        <p class="muted">Loading…</p>
+      </div>
     </section>
 
     <section class="card" id="send-card">
       <div class="card-head"><h2>Send</h2></div>
       <form id="send-form">
-        <label>Token
+        <label>Asset
           <select id="token-select"></select>
         </label>
-        <label>Amount
+        <label id="amount-label">Amount
           <div class="amount-row">
             <input id="amount" placeholder="0.0" inputmode="decimal" autocomplete="off" spellcheck="false" required />
             <button type="button" id="max-btn" class="ghost">MAX</button>
           </div>
           <span id="amount-usd" class="muted small"></span>
+        </label>
+        <label id="token-id-label" hidden>Token ID
+          <select id="token-id-select"></select>
+          <img id="nft-preview" class="nft-preview" alt="" hidden />
         </label>
         <label>Recipient
           <input id="recipient" placeholder="0x… or @username" autocomplete="off" spellcheck="false" required />
@@ -85,7 +94,7 @@
   <dialog id="confirm-modal">
     <h3>Confirm transfer</h3>
     <dl>
-      <dt>Token</dt><dd id="c-token"></dd>
+      <dt>Asset</dt><dd id="c-token"></dd>
       <dt>Amount</dt><dd id="c-amount"></dd>
       <dt>Recipient</dt><dd id="c-recipient" class="mono"></dd>
     </dl>

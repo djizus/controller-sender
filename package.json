@@ -1,7 +1,7 @@
 {
   "name": "controller-sender",
   "private": true,
-  "description": "Local webapp to send ERC20 tokens from a Cartridge Controller to any Starknet address",
+  "description": "Local webapp to send ERC20 tokens and NFTs from a Cartridge Controller to any Starknet address",
   "license": "MIT",
   "engines": { "node": ">=20" },
   "type": "module",

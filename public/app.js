@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   status: null,
   tokens: [],
+  collections: [], // NFT collections; select values are "nft:<index>"
   resolvedRecipient: null, // set when @username lookup succeeds
   authPolling: false,
 };
@@ -186,41 +187,216 @@ async function loadBalances() {
         row.style.cursor = "pointer";
         row.onclick = () => {
           $("token-select").value = t.address;
-          updateAmountUsd();
+          updateAssetInputs();
         };
         box.appendChild(row);
       }
       $("total-usd").textContent = total > 0 ? `≈ ${fmtUsd(total)}` : "";
     }
+    renderNfts(res);
     renderTokenSelect();
   } catch (err) {
     box.innerHTML = `<p class="muted">${err.message}</p>`;
   }
 }
 
+// ---------------------------------------------------------------------------
+// NFT images. The server returns the raw token URI; the metadata is decoded
+// here, so the server never fetches a URL chosen by a token contract. Only
+// data:image/ and https image sources are used.
+
+const nftImages = new Map(); // "address:tokenId" -> Promise<string|null>
+
+// IPFS goes through this server, since public gateways refuse browser requests.
+function httpUrl(u) {
+  if (u.startsWith("ipfs://")) {
+    const path = u.slice(7);
+    // Paths sometimes carry raw spaces; leave already-encoded ones alone.
+    return `/api/ipfs/${/%[0-9a-f]{2}/i.test(path) ? path : encodeURI(path)}`;
+  }
+  return /^https:\/\//.test(u) ? u : null;
+}
+
+function parseMetadata(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const m = /"image"\s*:\s*"([^"]+)"/.exec(text);
+    return m ? { image: m[1] } : null;
+  }
+}
+
+async function imageFromUri(uri) {
+  if (!uri) return null;
+  let meta;
+  if (uri.startsWith("data:image/")) return uri;
+  if (uri.startsWith("data:application/json")) {
+    const comma = uri.indexOf(",");
+    const payload = uri.slice(comma + 1);
+    let text;
+    if (uri.slice(0, comma).includes(";base64")) text = atob(payload);
+    else {
+      try {
+        text = decodeURIComponent(payload);
+      } catch {
+        text = payload;
+      }
+    }
+    meta = parseMetadata(text);
+  } else {
+    const url = httpUrl(uri);
+    if (!url) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    meta = parseMetadata(await res.text());
+  }
+  const image = meta?.image ?? meta?.image_url ?? null;
+  if (!image) return null;
+  return image.startsWith("data:image/") ? image : httpUrl(image);
+}
+
+function nftImage(address, tokenId) {
+  const key = `${address}:${tokenId}`;
+  if (!nftImages.has(key)) {
+    nftImages.set(
+      key,
+      api(`/api/nft-uri?address=${address}&tokenId=${tokenId}`)
+        .then((r) => imageFromUri(r.uri))
+        .catch(() => null),
+    );
+  }
+  return nftImages.get(key);
+}
+
+function renderNfts(res) {
+  const box = $("nfts");
+  state.collections = res.collections;
+  if (res.nftError) {
+    box.innerHTML = `<p class="muted">NFTs unavailable: ${esc(res.nftError)}</p>`;
+    return;
+  }
+  if (res.collections.length === 0) {
+    box.innerHTML = '<p class="muted">No NFTs found.</p>';
+    return;
+  }
+  box.innerHTML = "";
+  res.collections.forEach((c, i) => {
+    const row = document.createElement("div");
+    row.className = "token-row";
+    const n = c.tokens.length;
+    const allowed = c.tokens.every((t) => t.transferAllowed);
+    row.innerHTML = `
+      <span class="token-fallback">${esc(c.symbol.slice(0, 3))}</span>
+      <div class="token-meta">
+        <div class="sym">${esc(c.symbol)}${allowed ? "" : '<span class="tag" title="The session cannot transfer this collection yet. Re-authorize to allow it.">no perm</span>'}</div>
+        <div class="nm">${esc(c.name)}</div>
+      </div>
+      <div class="token-nums">
+        <div class="bal">${n}</div>
+        <div class="usd">${n === 1 ? "NFT" : "NFTs"}</div>
+      </div>`;
+    nftImage(c.tokens[0].address, c.tokens[0].tokenId).then((src) => {
+      if (!src) return;
+      const img = document.createElement("img");
+      img.className = "nft";
+      img.alt = "";
+      img.onload = () => row.firstElementChild.replaceWith(img);
+      img.src = src;
+    });
+    row.style.cursor = "pointer";
+    row.onclick = () => {
+      $("token-select").value = `nft:${i}`;
+      updateAssetInputs();
+    };
+    box.appendChild(row);
+  });
+}
+
+function updateNftPreview() {
+  const a = selectedAsset();
+  const img = $("nft-preview");
+  const nft = a?.kind === "nft" ? selectedNft(a) : null;
+  img.hidden = true;
+  if (!nft) return;
+  nftImage(nft.address, nft.tokenId).then((src) => {
+    // The selection may have moved on while the image loaded.
+    const current = selectedAsset();
+    const now = current?.kind === "nft" ? selectedNft(current) : null;
+    if (!src || !now || now.address !== nft.address || now.tokenId !== nft.tokenId) return;
+    img.src = src;
+    img.hidden = false;
+  });
+}
+
 function renderTokenSelect() {
   const sel = $("token-select");
   const prev = sel.value;
   sel.innerHTML = "";
+  const tokens = document.createElement("optgroup");
+  tokens.label = "Tokens";
   for (const t of state.tokens) {
     const opt = document.createElement("option");
     opt.value = t.address;
     opt.textContent = `${t.symbol}  ${fmtBalance(t.balance)}`;
-    sel.appendChild(opt);
+    tokens.appendChild(opt);
   }
-  if (prev && state.tokens.some((t) => t.address === prev)) sel.value = prev;
+  if (tokens.childElementCount) sel.appendChild(tokens);
+  const nfts = document.createElement("optgroup");
+  nfts.label = "NFTs";
+  state.collections.forEach((c, i) => {
+    const opt = document.createElement("option");
+    opt.value = `nft:${i}`;
+    opt.textContent = `${c.symbol}  ×${c.tokens.length}`;
+    nfts.appendChild(opt);
+  });
+  if (nfts.childElementCount) sel.appendChild(nfts);
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  updateAssetInputs();
+}
+
+// The selected asset: an ERC20 token (with balance) or an NFT collection.
+function selectedAsset() {
+  const value = $("token-select").value;
+  if (value.startsWith("nft:")) {
+    const c = state.collections[Number(value.slice(4))];
+    return c ? { kind: "nft", ...c } : null;
+  }
+  const t = state.tokens.find((t) => t.address === value);
+  return t ? { kind: "token", ...t } : null;
+}
+
+// The chosen NFT within the selected collection, as { address, tokenId, transferAllowed }.
+function selectedNft(collection) {
+  return collection.tokens[Number($("token-id-select").value)] ?? null;
+}
+
+function updateAssetInputs() {
+  const a = selectedAsset();
+  const isNft = a?.kind === "nft";
+  $("amount-label").hidden = isNft;
+  $("amount").required = !isNft;
+  $("token-id-label").hidden = !isNft;
+  if (isNft) {
+    const sel = $("token-id-select");
+    const prevKey = selectedNft(a) ? `${selectedNft(a).address}:${selectedNft(a).tokenId}` : null;
+    const contracts = new Set(a.tokens.map((t) => t.address)).size;
+    sel.innerHTML = "";
+    a.tokens.forEach((t, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `#${t.tokenId}${contracts > 1 ? `  (${short(t.address)})` : ""}`;
+      if (`${t.address}:${t.tokenId}` === prevKey) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+  updateNftPreview();
   updateAmountUsd();
 }
 
-function selectedToken() {
-  return state.tokens.find((t) => t.address === $("token-select").value) ?? null;
-}
-
 function updateAmountUsd() {
-  const t = selectedToken();
+  const t = selectedAsset();
   const amount = parseFloat($("amount").value);
   const el = $("amount-usd");
-  if (t && t.usd !== null && !Number.isNaN(amount) && Number(t.balance) > 0) {
+  if (t?.kind === "token" && t.usd !== null && !Number.isNaN(amount) && Number(t.balance) > 0) {
     el.textContent = `≈ ${fmtUsd((amount * t.usd) / Number(t.balance))}`;
   } else {
     el.textContent = "";
@@ -262,46 +438,59 @@ function finalRecipient() {
 // ---------------------------------------------------------------------------
 // Send flow
 
+// What the form would send right now: the asset, the request body and a label.
+function pendingTransfer() {
+  const a = selectedAsset();
+  const recipient = finalRecipient();
+  if (!a) return { error: "Pick an asset" };
+  if (!recipient) return { error: "Recipient not resolved yet" };
+  if (a.kind === "nft") {
+    const nft = selectedNft(a);
+    if (!nft) return { error: "Pick a token ID" };
+    return {
+      asset: { ...a, transferAllowed: nft.transferAllowed },
+      recipient,
+      body: { address: nft.address, tokenId: nft.tokenId, recipient },
+      label: `${a.symbol} #${nft.tokenId}`,
+    };
+  }
+  const amount = $("amount").value.trim();
+  if (!amount) return { error: "Enter an amount" };
+  const usd =
+    a.usd !== null && Number(a.balance) > 0
+      ? ` (≈ ${fmtUsd((parseFloat(amount) * a.usd) / Number(a.balance))})`
+      : "";
+  return { asset: a, recipient, body: { address: a.address, amount, recipient }, label: `${amount} ${a.symbol}`, usd };
+}
+
 $("send-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const t = selectedToken();
-  const recipient = finalRecipient();
-  const amount = $("amount").value.trim();
-  if (!t) return toast("Pick a token", "error");
-  if (!recipient) return toast("Recipient not resolved yet", "error");
-  if (!amount) return toast("Enter an amount", "error");
-  if (!t.transferAllowed) {
+  const p = pendingTransfer();
+  if (p.error) return toast(p.error, "error");
+  if (!p.asset.transferAllowed) {
     $("auth-banner").hidden = false;
-    return toast(`The session cannot transfer ${t.symbol} yet. Click "Authorize session" first.`, "error");
+    return toast(`The session cannot transfer ${p.asset.symbol} yet. Click "Authorize session" first.`, "error");
   }
-  $("c-token").textContent = `${t.symbol} (${t.name})`;
-  $("c-amount").textContent = `${amount} ${t.symbol}${
-    t.usd !== null && Number(t.balance) > 0
-      ? ` (≈ ${fmtUsd((parseFloat(amount) * t.usd) / Number(t.balance))})`
-      : ""
-  }`;
-  $("c-recipient").textContent = recipient;
+  $("c-token").textContent = `${p.asset.symbol} (${p.asset.name})`;
+  $("c-amount").textContent = `${p.label}${p.usd ?? ""}`;
+  $("c-recipient").textContent = p.recipient;
   $("confirm-modal").showModal();
 });
 
 $("c-cancel").onclick = () => $("confirm-modal").close();
 
 $("c-confirm").onclick = async () => {
-  const t = selectedToken();
-  const recipient = finalRecipient();
-  const amount = $("amount").value.trim();
+  const p = pendingTransfer();
   $("confirm-modal").close();
+  if (p.error) return toast(p.error, "error");
   const btn = $("send-btn");
   btn.disabled = true;
   btn.textContent = "Sending… (waiting for confirmation)";
   try {
-    const res = await api("/api/transfer", {
-      method: "POST",
-      body: JSON.stringify({ address: t.address, amount, recipient }),
-    });
+    const res = await api("/api/transfer", { method: "POST", body: JSON.stringify(p.body) });
     if (res.txHash) {
       toast(
-        `Sent ${amount} ${t.symbol} ✓ <a href="https://voyager.online/tx/${res.txHash}" target="_blank" rel="noopener">View on Voyager ↗</a>`,
+        `Sent ${p.label} ✓ <a href="https://voyager.online/tx/${res.txHash}" target="_blank" rel="noopener">View on Voyager ↗</a>`,
         "success",
         true,
       );
@@ -325,15 +514,16 @@ $("c-confirm").onclick = async () => {
 };
 
 $("max-btn").onclick = () => {
-  const t = selectedToken();
-  if (t) {
+  const t = selectedAsset();
+  if (t?.kind === "token") {
     $("amount").value = t.balance;
     updateAmountUsd();
   }
 };
 
 $("amount").addEventListener("input", updateAmountUsd);
-$("token-select").addEventListener("change", updateAmountUsd);
+$("token-select").addEventListener("change", updateAssetInputs);
+$("token-id-select").addEventListener("change", updateNftPreview);
 
 // ---------------------------------------------------------------------------
 // Add token & settings
