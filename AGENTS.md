@@ -3,8 +3,9 @@
 Controller Sender is a web page on Cloudflare Pages that sends ERC20 tokens and ERC721
 NFTs from a Cartridge Controller to any Starknet mainnet address. Users connect with the
 Controller SDK and approve every send in its popup. Live at https://controller.realms.party.
-Read `README.md` first. Its Usage section is the feature map: update it in the change that
-adds, moves or removes a feature.
+`README.md` is written for players who are not technical. Keep it free of jargon and put
+technical detail here. Its "How to send" and "Other things you can do" sections are the
+feature map. Update them in the change that adds, moves or removes a feature.
 
 ## Layout
 
@@ -21,7 +22,47 @@ adds, moves or removes a feature.
 - `public/_headers`: the CSP and other security headers.
 - `public/app.js`: build output, gitignored.
 - `wrangler.toml`: the Pages project. Production is the `controller-sender` project with
-  the custom domain `controller.realms.party`.
+  the custom domain `controller.realms.party` (proxied CNAME in the realms.party zone).
+  Set the `STARKSCAN_API_KEY` secret on it to use Starkscan's official API with a key.
+
+## How it works
+
+- The page is static HTML, CSS and one JavaScript bundle. esbuild bundles `src/app.js`
+  and `src/chain.ts` with the `@cartridge/controller` SDK into `public/app.js`.
+- Tokens come from the Ekubo mainnet list, with USD prices and logos. A static fallback
+  list covers the case where Ekubo is down.
+- Balances, `owner_of`, `token_uri`, token metadata and receipts are JSON-RPC requests
+  from the browser to `api.cartridge.gg/x/starknet/mainnet`, batched 200 calls at a time.
+  `@username` resolves through `api.cartridge.gg/lookup`.
+- NFTs come from Starkscan's transfer index. Every ERC721 token the controller ever
+  received is a candidate, and `owner_of` on-chain decides which ones it still holds, so a
+  stale index can hide an NFT but never show one that is gone. Starkscan returns 403 to
+  requests with a browser Origin, so `functions/api/nfts.ts` fetches it. NFTs are grouped
+  by collection name, since one collection can span several contracts.
+- NFT images come from `token_uri`. The browser decodes the metadata and shows
+  `data:image/` or `https` images only, loading each when it scrolls into view. IPFS links
+  load from `gateway.pinata.cloud`, which sends CORS headers. Every public gateway tested
+  rate-limits Cloudflare Worker egress, so the site does not proxy IPFS. Pinata also
+  throttles a browser that opens many images at once; those show a placeholder.
+- A send is one `account.execute` multicall: `transfer(recipient, u256 amount)` per token
+  and `transfer_from(controller, recipient, u256 id)` per NFT. The page then polls the
+  receipt for up to two minutes.
+
+## Fees
+
+Gas is self-paid in STRK. A single transfer charged about 0.09 STRK in October 2026, but
+the keychain sets resource bounds near 20 times the estimate (about 4x gas amount, 4.5x
+gas price), and Starknet rejects a transaction whose maximum fee exceeds the balance. A
+single transfer needs about 1.7 STRK on hand. Below that the popup shows "Add funds" and
+`execute` rejects with "Validation failure". The SDK's `selfFundedGasMultiplier` is
+already at its 1.5 minimum, so the page cannot lower this.
+
+## Security model
+
+The site holds no keys and no user data. Signing happens in Cartridge's keychain iframe.
+Third-party strings are escaped before rendering. `public/_headers` sets a CSP that runs
+scripts only from the site, loads fonts only from the site and play.realms.party, frames
+only `x.cartridge.gg`, and forbids framing the site.
 
 ## Commands
 

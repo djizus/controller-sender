@@ -1,108 +1,77 @@
 # Controller Sender
 
-A web page that sends ERC20 tokens and ERC721 NFTs from a
-[Cartridge Controller](https://cartridge.gg) to any Starknet address, such as a Ready
-wallet. Mainnet only. It runs on Cloudflare Pages at https://controller.realms.party.
+Move your tokens and NFTs out of your Cartridge Controller, the wallet you use in Realms
+and other Cartridge games, to any other wallet. You can send many things at once.
 
-You connect with your Cartridge passkey. The page never holds a key. Every send goes
-through the Controller popup, where you approve it.
+Open **https://controller.realms.party** in any browser, on a computer or a phone.
 
-## Usage
+## Is it safe?
 
-**Connect.** Click "Connect Controller" and log in. The page remembers the connection in
-this browser until you click Disconnect. Your username and address show in the header.
-Click the address to copy it.
+You log in with the same passkey you use in Cartridge games. The site never sees it and
+cannot move anything on its own. Every send opens a Cartridge window that shows exactly
+what will leave your wallet, and nothing happens until you approve it there.
 
-**Pick what to send.** The Balances card lists every token with a balance and every NFT
-the controller holds. Tick a token to add it. Click an NFT collection to list its NFTs
-and tick the ones you want, or tick the collection itself to select all of them. ⟳
-reloads the lists.
+## How to send
 
-**Send.** Each ticked item appears in the Send card. Enter an amount for every token, or
-press MAX. Enter a recipient, either a raw address or `@username`, then press Send and
-check the summary. Approve in the Controller popup. Everything goes out in one
-transaction, so if one transfer fails, none are sent. The page then reports one of:
+1. **Connect.** Press "Connect Controller" and log in with your passkey. The site
+   remembers you in this browser until you press Disconnect.
+2. **Pick what to send.** Your tokens and NFTs are listed under Balances and NFTs. Tick
+   the ones you want to send.
+   - To see the NFTs of a collection, click the collection. Tick single NFTs, or tick
+     the collection's own box to pick all of them.
+   - ⟳ refreshes the lists.
+3. **Set the amounts.** Everything you ticked shows up in the Send box. Type an amount
+   for each token, or press MAX to send all of it.
+4. **Choose who receives it.** Paste a wallet address (it starts with `0x`) or type a
+   Cartridge username with `@` in front, like `@friend`. Check the address twice. A send
+   cannot be undone.
+5. **Send.** Press Send, read the summary, then approve in the Cartridge window.
 
-- **Sent**, with a Voyager link, once the transaction is in a block.
-- **Reverted**, with the reason, if it landed but failed.
-- **Submitted, not confirmed yet**, if it took more than two minutes. Check the link.
-- **Transfer not sent**, if the popup was closed or refused it. Nothing went on-chain.
+Everything you picked goes out together. If one part fails, nothing is sent, so you never
+end up with half a transfer.
 
-On a phone the Send card is a bar at the bottom of the screen with the selection count.
-Tap it to open the card.
+On a phone, the Send box sits at the bottom of the screen and shows how many things you
+picked. Tap it to open it.
 
-**Add a token.** Tokens outside the Ekubo list can be added by contract address at the
-bottom of the token list. The page reads `symbol`, `name` and `decimals` on-chain.
+## What the messages mean
 
-**Settings.** Save a default recipient. Custom tokens and the default recipient are
-stored in this browser only.
+- **Sent ✓**: done. The "View on Voyager" link shows the transfer on the public explorer.
+- **Transfer not sent**: you closed the Cartridge window, or it refused the send. Nothing
+  left your wallet.
+- **Transfer reverted**: the network tried and failed. Nothing left your wallet except
+  the small network fee.
+- **Submitted, not confirmed yet**: the network is slow. Open the Voyager link to follow
+  it, and don't send again until it shows up.
 
 ## Fees
 
-Gas is paid in STRK from the controller. A send costs little. A single transfer charged
-about 0.09 STRK in October 2026. Starknet, though, only runs a transaction if the account
-holds its maximum fee, and the Controller popup sets that maximum about 20 times above
-the expected cost to survive price spikes. A single transfer then needs about 1.7 STRK in
-the account, and larger multicalls need more. With too little, the popup shows "Add
-funds" and the page reports "Transfer not sent: Validation failure". Keep around 3 STRK
-in the controller.
+Each send pays a small network fee in STRK, Starknet's token. It costs a fraction of a
+cent, but the wallet must hold **about 3 STRK** before the network accepts a send. Most of
+that is only a safety margin and stays in your wallet.
 
-## How it works
+If the Cartridge window shows "Add funds" and the site says "Validation failure", your
+wallet is below that margin. Add some STRK and try again.
 
-- The page is static HTML, CSS and one JavaScript bundle. `src/app.js` is the UI and
-  `src/chain.ts` does the Starknet reads. esbuild bundles them with the
-  `@cartridge/controller` SDK into `public/app.js`.
-- Tokens come from the Ekubo mainnet list, with USD prices and logos. A static fallback
-  list covers the case where Ekubo is down.
-- Balances, `owner_of`, `token_uri`, token metadata and transaction receipts are
-  `starknet` JSON-RPC requests from the browser to `api.cartridge.gg/x/starknet/mainnet`,
-  batched 200 calls at a time. `@username` resolves through Cartridge's lookup API.
-- NFTs come from Starkscan's transfer index: every ERC721 token the controller ever
-  received is a candidate, and `owner_of` on-chain decides which ones it still holds. A
-  stale index can hide an NFT but never show one that is gone. Starkscan refuses browser
-  requests, so `functions/api/nfts.ts` fetches the index and caches it for five minutes.
-  NFTs are grouped by collection name, since one collection can span several contracts.
-- NFT images come from `token_uri`. The browser decodes the metadata and shows
-  `data:image/` or `https` images only, loading each one when it scrolls into view. IPFS
-  links load from Pinata's public gateway, which sends CORS headers. The gateway host is
-  fixed, so a token contract can only choose the path. Public gateways rate-limit
-  Cloudflare's servers, so the site does not proxy IPFS.
-- A send is one `account.execute` multicall. A token is a
-  `transfer(recipient, amount)` call and an NFT is a
-  `transfer_from(controller, recipient, id)` call. The page then polls the receipt.
-- The look follows [play.realms.party](https://play.realms.party): its colors, the Bokor
-  and Atkinson Hyperlegible Next fonts, the Realms logo and the landscape art. Fonts and
-  images load from that site, so this repository holds none of them.
+## Other things you can do
 
-## Known limits
+- **A token is missing from the list?** Paste its contract address into "Add token by
+  address" under your tokens.
+- **Always send to the same wallet?** Open Settings in the Send box and save it as your
+  default recipient. It fills in automatically next time.
 
-- Pinata throttles a browser that requests many IPFS images in a short time. Those images
-  then show a placeholder until the limit clears.
-- The NFT list depends on Starkscan's keyless endpoint. If it goes away, set the
-  `STARKSCAN_API_KEY` secret (see Development).
+Your saved recipient and added tokens are kept in this browser only.
 
-## Security model
+## Questions
 
-The site holds no keys and no user data. Signing happens in Cartridge's keychain iframe,
-which shows each multicall and asks for approval. Third-party strings (token names,
-symbols, metadata) are escaped before they are rendered. `public/_headers` sets a Content
-Security Policy that only runs scripts from the site itself, loads fonts only from the
-site and play.realms.party, frames only Cartridge's keychain, and forbids framing the
-site.
+- **Some NFT pictures don't show.** Some pictures are hosted on a service that slows down
+  when many are opened at once. Wait a minute and refresh. Your NFTs are still there.
+- **An NFT I just received is missing.** The list can take a few minutes to catch up.
+  Press ⟳ later.
+- **Which network is this?** Starknet mainnet, the real network. Sends move real assets.
 
-## Development
+## For developers
 
-```bash
-npm install
-npm run dev      # build, then wrangler pages dev on http://127.0.0.1:3210
-npm run check    # tsc --noEmit
-npm run deploy   # build, then wrangler pages deploy
-```
-
-`npm run deploy` needs `wrangler login` and a Pages project named `controller-sender`. The
-custom domain `controller.realms.party` is attached to that project in Cloudflare. Set the
-`STARKSCAN_API_KEY` secret on the project to use Starkscan's official API with a key
-instead of the keyless endpoint.
+How the site is built, run and deployed is in [AGENTS.md](AGENTS.md).
 
 ## License
 
