@@ -3,39 +3,33 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Controller Sender</title>
+  <title>Controller Sender · Realms</title>
+  <meta name="theme-color" content="#130f0c" />
+  <link rel="icon" href="https://play.realms.party/images/game-favicon.ico" />
+  <link rel="apple-touch-icon" href="https://play.realms.party/images/game-apple-touch-icon-180x180.png" />
+  <link rel="preload" href="https://play.realms.party/fonts/atkinson-hyperlegible-next.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header>
-    <div class="brand">
-      <span class="logo">⌁</span>
-      <h1>Controller Sender</h1>
-      <span class="badge net">MAINNET</span>
-    </div>
+    <a class="brand" href="https://play.realms.party/">
+      <img class="logo" src="https://play.realms.party/images/logos/realms-lockup.svg" alt="Realms" />
+      <h1>Sender</h1>
+    </a>
     <div class="identity">
       <span id="username" class="pill" hidden></span>
       <button id="address" class="pill mono" title="Click to copy" hidden></button>
-      <span id="session-pill" class="pill session off">checking…</span>
+      <button id="disconnect-btn" class="ghost" hidden>Disconnect</button>
     </div>
   </header>
 
-  <div id="auth-banner" class="banner" hidden>
-    <div>
-      <strong>Session authorization needed</strong>
-      <p id="auth-message">This app uses its own Cartridge session with <code>transfer</code> permission
-        on the tokens you hold and <code>transfer_from</code> on your NFT collections. Your game session
-        is not touched. Re-authorize after adding a token or receiving an NFT from a new collection.</p>
-      <p id="auth-link-row" hidden>
-        <a id="auth-link" href="#" target="_blank" rel="noopener">Open Cartridge to approve ↗</a>
-        <span class="spinner"></span> waiting for approval. The CLI locks the username to this account.
-        Wait for it to appear, then log in with your passkey. If it stays empty, reload the popup.
-      </p>
-    </div>
-    <button id="auth-btn" class="primary">Authorize session</button>
-  </div>
+  <section id="connect-card" class="card connect" hidden>
+    <h2>Send tokens and NFTs from your Controller</h2>
+    <p class="muted">Connect with your Cartridge passkey. You approve every send in the Controller popup.</p>
+    <button id="connect-btn" class="primary">Connect Controller</button>
+  </section>
 
-  <main>
+  <main id="app" hidden>
     <section class="card" id="balances-card">
       <div class="card-head">
         <h2>Balances</h2>
@@ -58,7 +52,10 @@
     </section>
 
     <section class="card" id="send-card">
-      <div class="card-head"><h2>Send</h2></div>
+      <button type="button" id="send-head" class="card-head send-head">
+        <h2>Send</h2>
+        <span id="send-count" class="muted"></span>
+      </button>
       <form id="send-form">
         <div id="selection" class="token-list selection"></div>
         <label>Recipient
@@ -71,7 +68,7 @@
       <details id="settings">
         <summary>Settings</summary>
         <form id="settings-form" class="inline-form">
-          <input id="default-recipient" placeholder="Default recipient (your Ready wallet 0x…)" spellcheck="false" />
+          <input id="default-recipient" placeholder="Default recipient (0x…)" spellcheck="false" />
           <button class="ghost" type="submit">Save</button>
         </form>
       </details>
@@ -92,6 +89,6 @@
   </dialog>
 
   <div id="toasts"></div>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

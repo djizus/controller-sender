@@ -1,31 +1,51 @@
+import Controller from "@cartridge/controller";
+import {
+  formatUnits,
+  getHeldNfts,
+  getHeldTokens,
+  isValidAddress,
+  lookupUsername,
+  normalizeAddress,
+  parseAmount,
+  readToken,
+  tokenUri,
+  u256Calldata,
+  waitForTransaction,
+} from "./chain.ts";
+
 const $ = (id) => document.getElementById(id);
 
+const controller = new Controller({ defaultChainId: "0x534e5f4d41494e" }); // SN_MAIN
+
 const state = {
-  status: null,
+  account: null, // the connected Controller account
+  address: null, // its normalized address
   assets: new Map(), // key -> token or NFT, rebuilt on every balance load
-  collections: [],
   selection: new Map(), // key -> { amount } for what the Send card will send
   expanded: new Set(), // collection keys whose NFTs are listed
   sending: false,
   resolvedRecipient: null, // set when @username lookup succeeds
-  authPolling: false,
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 
-async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...opts,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(body.error || `${res.status} ${res.statusText}`);
-    err.body = body;
-    throw err;
+// Per-browser settings: the default recipient and tokens added by address.
+// Storage can be unavailable (private windows, blocked site data); the page
+// then works without remembering anything.
+function loadSetting(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
   }
-  return body;
+}
+
+function saveSetting(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
 }
 
 function toast(message, kind = "info", html = false) {
@@ -64,94 +84,50 @@ function fmtBalance(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Status & session
+// Connection
 
-async function loadStatus() {
-  const s = await api("/api/status");
-  state.status = s;
-
-  if (s.username) {
-    $("username").textContent = s.username;
+async function showAccount(account) {
+  state.account = account;
+  state.address = account ? normalizeAddress(account.address) : null;
+  $("connect-card").hidden = !!account;
+  $("app").hidden = !account;
+  $("disconnect-btn").hidden = !account;
+  $("address").hidden = !account;
+  $("username").hidden = true;
+  if (!account) return;
+  $("address").textContent = short(state.address);
+  controller.username()?.then((name) => {
+    if (!name || state.account !== account) return;
+    $("username").textContent = name;
     $("username").hidden = false;
-  }
-  if (s.address) {
-    $("address").textContent = short(s.address);
-    $("address").hidden = false;
-    $("address").onclick = () => {
-      navigator.clipboard.writeText(s.address);
-      toast("Controller address copied");
-    };
-  }
-
-  const pill = $("session-pill");
-  if (s.session) {
-    pill.textContent = `session active · expires ${s.session.expiresFormatted.replace(" UTC", "")}`;
-    pill.className = "pill session on";
-  } else {
-    pill.textContent = "no transfer session";
-    pill.className = "pill session off";
-  }
-
-  $("auth-banner").hidden = !!s.session && s.auth.status !== "pending";
-
-  if (s.auth.status === "pending" && s.auth.url) {
-    $("auth-link").href = s.auth.url;
-    $("auth-link-row").hidden = false;
-    startAuthPolling();
-  } else {
-    $("auth-link-row").hidden = true;
-  }
-
-  if (s.defaultRecipient) {
-    $("default-recipient").value = s.defaultRecipient;
-    if (!$("recipient").value) $("recipient").value = s.defaultRecipient;
-  }
-  return s;
+  });
+  await loadBalances();
 }
 
-async function startAuth() {
-  const btn = $("auth-btn");
+async function connect() {
+  const btn = $("connect-btn");
   btn.disabled = true;
-  btn.textContent = "Preparing…";
   try {
-    const res = await api("/api/auth", { method: "POST", body: "{}" });
-    if (res.url) {
-      $("auth-link").href = res.url;
-      $("auth-link-row").hidden = false;
-      window.open(res.url, "_blank");
-      startAuthPolling();
-    }
+    const account = await controller.connect();
+    if (account) await showAccount(account);
   } catch (err) {
-    toast(`Authorization failed: ${err.message}`, "error");
+    toast(`Could not connect: ${err.message}`, "error");
   } finally {
     btn.disabled = false;
-    btn.textContent = "Authorize session";
   }
 }
 
-function startAuthPolling() {
-  if (state.authPolling) return;
-  state.authPolling = true;
-  const timer = setInterval(async () => {
-    try {
-      const s = await api("/api/status");
-      if (s.session && s.auth.status !== "pending") {
-        clearInterval(timer);
-        state.authPolling = false;
-        $("auth-banner").hidden = true;
-        toast("Session authorized ✓", "success");
-        await loadStatus();
-        await loadBalances();
-      } else if (s.auth.status === "failed") {
-        clearInterval(timer);
-        state.authPolling = false;
-        toast(`Authorization failed: ${s.auth.error || "unknown error"}`, "error");
-      }
-    } catch {
-      /* keep polling */
-    }
-  }, 3000);
+async function disconnect() {
+  await controller.disconnect();
+  state.selection.clear();
+  state.assets = new Map();
+  await showAccount(null);
 }
+
+$("address").onclick = () => {
+  navigator.clipboard.writeText(state.address);
+  toast("Controller address copied");
+};
 
 // ---------------------------------------------------------------------------
 // Balances. Ticking a token or an NFT adds it to the Send card.
@@ -190,28 +166,41 @@ function tokenIcon(fallback, t) {
   if (/^https?:\/\//.test(t.logoUrl ?? "")) setIcon(fallback, () => t.logoUrl);
 }
 
-const noPerm = (what) =>
-  `<span class="tag" title="The session cannot transfer this ${what} yet. Re-authorize to allow it.">no perm</span>`;
-
 async function loadBalances() {
   const box = $("balances");
   try {
-    const res = await api("/api/balances");
+    const address = state.address;
+    const [held, nfts] = await Promise.all([
+      getHeldTokens(address, loadSetting("customTokens", [])),
+      getHeldNfts(address).then(
+        (list) => ({ list, error: null }),
+        (err) => ({ list: [], error: err.message }),
+      ),
+    ]);
+    if (address !== state.address) return; // disconnected or switched meanwhile
+    const tokens = held
+      .map((t) => {
+        const balance = formatUnits(t.raw, t.decimals);
+        return { ...t, balance, usd: t.usdPrice !== undefined ? Number(balance) * t.usdPrice : null };
+      })
+      .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.raw > a.raw ? 1 : b.raw < a.raw ? -1 : 0));
+    const collections = groupCollections(nfts.list);
+
     state.assets = new Map();
-    for (const t of res.tokens) state.assets.set(tokenKey(t.address), { kind: "token", ...t });
-    for (const c of res.collections) {
+    for (const t of tokens) state.assets.set(tokenKey(t.address), { kind: "token", ...t });
+    for (const c of collections) {
       for (const n of c.tokens) {
         state.assets.set(nftKey(n.address, n.tokenId), { kind: "nft", symbol: c.symbol, name: c.name, ...n });
       }
     }
     for (const key of state.selection.keys()) if (!state.assets.has(key)) state.selection.delete(key);
 
-    if (res.tokens.length === 0) {
+    if (tokens.length === 0) {
       box.innerHTML = '<p class="muted">No token balances found.</p>';
     } else {
       box.innerHTML = "";
       let total = 0;
-      for (const t of res.tokens) {
+      for (const t of tokens) {
         total += t.usd ?? 0;
         const row = document.createElement("label");
         row.className = "token-row";
@@ -219,7 +208,7 @@ async function loadBalances() {
           <input type="checkbox" data-key="${esc(tokenKey(t.address))}" />
           <span class="token-fallback">${esc(t.symbol.slice(0, 3))}</span>
           <div class="token-meta">
-            <div class="sym">${esc(t.symbol)}${t.transferAllowed ? "" : noPerm("token")}</div>
+            <div class="sym">${esc(t.symbol)}</div>
             <div class="nm">${esc(t.name)}</div>
           </div>
           <div class="token-nums">
@@ -231,7 +220,7 @@ async function loadBalances() {
       }
       $("total-usd").textContent = total > 0 ? `≈ ${fmtUsd(total)}` : "";
     }
-    renderNfts(res);
+    renderNfts(collections, nfts.error);
     syncSelection();
   } catch (err) {
     box.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
@@ -239,6 +228,18 @@ async function loadBalances() {
 }
 
 $("balances").addEventListener("change", (e) => toggle([e.target.dataset.key], e.target.checked));
+
+// A collection is a symbol and name. One collection can span several contracts
+// (seasonal deployments, per-type chests), so each token carries its contract.
+function groupCollections(nfts) {
+  const groups = new Map();
+  for (const n of nfts) {
+    const key = `${n.symbol}\n${n.name}`;
+    if (!groups.has(key)) groups.set(key, { symbol: n.symbol, name: n.name, tokens: [] });
+    groups.get(key).tokens.push({ address: n.address, tokenId: n.tokenId.toString() });
+  }
+  return [...groups.values()].sort((a, b) => b.tokens.length - a.tokens.length);
+}
 
 function toggle(keys, on) {
   for (const key of keys) {
@@ -255,12 +256,13 @@ function toggle(keys, on) {
 
 const nftImages = new Map(); // "address:tokenId" -> Promise<string|null>
 
-// IPFS goes through this server, since public gateways refuse browser requests.
+// Pinata's gateway sends CORS headers, so the browser reads IPFS metadata from it
+// directly. Gateways rate-limit Cloudflare's servers, so a proxy here would fail.
 function httpUrl(u) {
   if (u.startsWith("ipfs://")) {
     const path = u.slice(7);
     // Paths sometimes carry raw spaces; leave already-encoded ones alone.
-    return `/api/ipfs/${/%[0-9a-f]{2}/i.test(path) ? path : encodeURI(path)}`;
+    return `https://gateway.pinata.cloud/ipfs/${/%[0-9a-f]{2}/i.test(path) ? path : encodeURI(path)}`;
   }
   return /^https:\/\//.test(u) ? u : null;
 }
@@ -307,39 +309,37 @@ function nftImage(address, tokenId) {
   if (!nftImages.has(key)) {
     nftImages.set(
       key,
-      api(`/api/nft-uri?address=${address}&tokenId=${tokenId}`)
-        .then((r) => imageFromUri(r.uri))
+      tokenUri(address, BigInt(tokenId))
+        .then(imageFromUri)
         .catch(() => null),
     );
   }
   return nftImages.get(key);
 }
 
-function renderNfts(res) {
+function renderNfts(collections, error) {
   const box = $("nfts");
-  state.collections = res.collections;
-  if (res.nftError) {
-    box.innerHTML = `<p class="muted">NFTs unavailable: ${esc(res.nftError)}</p>`;
+  if (error) {
+    box.innerHTML = `<p class="muted">NFTs unavailable: ${esc(error)}</p>`;
     return;
   }
-  if (res.collections.length === 0) {
+  if (collections.length === 0) {
     box.innerHTML = '<p class="muted">No NFTs found.</p>';
     return;
   }
   box.innerHTML = "";
-  for (const c of res.collections) {
+  for (const c of collections) {
     const ckey = collectionKey(c);
     const keys = c.tokens.map((t) => nftKey(t.address, t.tokenId));
     const open = state.expanded.has(ckey);
     const n = c.tokens.length;
-    const allowed = c.tokens.every((t) => t.transferAllowed);
     const row = document.createElement("div");
     row.className = "token-row collection";
     row.innerHTML = `
       <input type="checkbox" class="all" title="Select all" />
       <span class="token-fallback">${esc(c.symbol.slice(0, 3))}</span>
       <div class="token-meta">
-        <div class="sym">${esc(c.symbol)}${allowed ? "" : noPerm("collection")}</div>
+        <div class="sym">${esc(c.symbol)}</div>
         <div class="nm">${esc(c.name)}</div>
       </div>
       <div class="token-nums">
@@ -358,7 +358,7 @@ function renderNfts(res) {
     row.onclick = () => {
       if (open) state.expanded.delete(ckey);
       else state.expanded.add(ckey);
-      renderNfts(res);
+      renderNfts(collections);
       syncSelection();
     };
     box.appendChild(row);
@@ -415,6 +415,7 @@ function renderSelection() {
   const box = $("selection");
   box.innerHTML = "";
   const n = state.selection.size;
+  $("send-count").textContent = n ? `${n} selected` : "";
   $("send-btn").disabled = n === 0 || state.sending;
   if (!state.sending) $("send-btn").textContent = n > 1 ? `Send ${n} items` : "Send";
   if (n === 0) {
@@ -481,10 +482,11 @@ $("recipient").addEventListener("input", () => {
   if (value.startsWith("@") && value.length > 1) {
     lookupTimer = setTimeout(async () => {
       try {
-        const res = await api(`/api/lookup?username=${encodeURIComponent(value.slice(1))}`);
-        if (res.address) {
-          state.resolvedRecipient = res.address;
-          $("recipient-hint").textContent = `@${res.username} → ${short(res.address)}`;
+        const address = await lookupUsername(value.slice(1));
+        if ($("recipient").value.trim() !== value) return; // typed on meanwhile
+        if (address) {
+          state.resolvedRecipient = address;
+          $("recipient-hint").textContent = `${value} → ${short(address)}`;
         } else {
           $("recipient-hint").textContent = `No controller found for ${value}`;
         }
@@ -504,38 +506,47 @@ function finalRecipient() {
 // ---------------------------------------------------------------------------
 // Send flow
 
-// What the form would send right now: one entry per selected asset.
+// What the form would send right now: one call per selected asset.
 function pendingTransfer() {
   const recipient = finalRecipient();
   if (state.selection.size === 0) return { error: "Tick something to send" };
   if (!recipient) return { error: "Recipient not resolved yet" };
+  if (!isValidAddress(recipient)) return { error: "Invalid recipient address" };
   const items = [];
   for (const [key, sel] of state.selection) {
     const a = state.assets.get(key);
     if (a.kind === "nft") {
-      items.push({ asset: a, label: `${a.symbol} #${a.tokenId}`, body: { address: a.address, tokenId: a.tokenId } });
+      items.push({
+        label: `${a.symbol} #${a.tokenId}`,
+        call: {
+          contractAddress: a.address,
+          entrypoint: "transfer_from",
+          calldata: [state.address, recipient, ...u256Calldata(BigInt(a.tokenId))],
+        },
+      });
       continue;
     }
     if (!sel.amount) return { error: `Enter an amount for ${a.symbol}` };
+    let raw;
+    try {
+      raw = parseAmount(sel.amount, a.decimals);
+    } catch (err) {
+      return { error: `${a.symbol}: ${err.message}` };
+    }
+    if (raw <= 0n) return { error: `${a.symbol}: amount must be greater than zero` };
     const usd = tokenUsd(a, sel.amount);
     items.push({
-      asset: a,
       label: `${sel.amount} ${a.symbol}${usd === null ? "" : ` (≈ ${fmtUsd(usd)})`}`,
-      body: { address: a.address, amount: sel.amount },
+      call: { contractAddress: a.address, entrypoint: "transfer", calldata: [recipient, ...u256Calldata(raw)] },
     });
   }
-  return { items, recipient, body: { recipient, transfers: items.map((i) => i.body) } };
+  return { items, recipient: normalizeAddress(recipient) };
 }
 
 $("send-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const p = pendingTransfer();
   if (p.error) return toast(p.error, "error");
-  const blocked = [...new Set(p.items.filter((i) => !i.asset.transferAllowed).map((i) => i.asset.symbol))];
-  if (blocked.length) {
-    $("auth-banner").hidden = false;
-    return toast(`The session cannot transfer ${blocked.join(", ")} yet. Click "Authorize session" first.`, "error");
-  }
   $("c-items").innerHTML = p.items.map((i) => `<li>${esc(i.label)}</li>`).join("");
   $("c-recipient").textContent = p.recipient;
   $("c-atomic").hidden = p.items.length < 2;
@@ -544,35 +555,36 @@ $("send-form").addEventListener("submit", (e) => {
 
 $("c-cancel").onclick = () => $("confirm-modal").close();
 
+// All transfers go out as one multicall, so they succeed or fail together.
+// The Controller popup shows the calls and asks the user to approve them.
 $("c-confirm").onclick = async () => {
   const p = pendingTransfer();
   $("confirm-modal").close();
   if (p.error) return toast(p.error, "error");
   state.sending = true;
   $("send-btn").disabled = true;
-  $("send-btn").textContent = "Sending… (waiting for confirmation)";
+  $("send-btn").textContent = "Approve in Controller…";
   const what = p.items.length === 1 ? p.items[0].label : `${p.items.length} items`;
+  let hash;
   try {
-    const res = await api("/api/transfer", { method: "POST", body: JSON.stringify(p.body) });
-    if (res.txHash) {
-      toast(
-        `Sent ${esc(what)} ✓ <a href="https://voyager.online/tx/${esc(res.txHash)}" target="_blank" rel="noopener">View on Voyager ↗</a>`,
-        "success",
-        true,
-      );
-    } else {
-      toast(`Transfer submitted (no tx hash returned)`, "success");
-    }
-    state.selection.clear();
-    setTimeout(loadBalances, 4000);
+    ({ transaction_hash: hash } = await state.account.execute(p.items.map((i) => i.call)));
   } catch (err) {
-    if (err.body?.needsReauth) {
-      $("auth-banner").hidden = false;
-      toast(`${err.message}`, "error");
-    } else {
-      const hint = err.body?.recoveryHint ? `. ${err.body.recoveryHint}` : "";
-      toast(`Transfer failed: ${err.message}${hint}`, "error");
-    }
+    // The SDK rejects with its own error objects, not always Error instances.
+    toast(`Transfer not sent: ${err?.message ?? JSON.stringify(err)}`, "error");
+    state.sending = false;
+    syncSelection();
+    return;
+  }
+  // From here the transaction is on its way, so the selection is spent either way.
+  state.selection.clear();
+  const link = `<a href="https://voyager.online/tx/${esc(hash)}" target="_blank" rel="noopener">View on Voyager ↗</a>`;
+  try {
+    $("send-btn").textContent = "Sending… (waiting for confirmation)";
+    const outcome = await waitForTransaction(hash);
+    if (outcome.status === "succeeded") toast(`Sent ${esc(what)} ✓ ${link}`, "success", true);
+    else if (outcome.status === "reverted") toast(`Transfer reverted: ${esc(outcome.revertReason)} ${link}`, "error", true);
+    else toast(`Submitted, not confirmed yet. ${link}`, "info", true);
+    setTimeout(loadBalances, 4000);
   } finally {
     state.sending = false;
     syncSelection();
@@ -584,47 +596,49 @@ $("c-confirm").onclick = async () => {
 
 $("add-token-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const address = $("add-token-address").value.trim();
-  if (!address) return;
+  const input = $("add-token-address").value.trim();
+  if (!input) return;
+  if (!isValidAddress(input)) return toast("Invalid token address", "error");
+  const address = normalizeAddress(input);
+  const custom = loadSetting("customTokens", []);
+  if (custom.some((t) => t.address === address) || state.assets.has(tokenKey(address))) {
+    return toast("Token already in the list", "error");
+  }
   try {
-    const res = await api("/api/tokens", { method: "POST", body: JSON.stringify({ address }) });
+    const token = await readToken(address);
+    saveSetting("customTokens", [...custom, token]);
     $("add-token-address").value = "";
-    toast(`Added ${res.token.symbol}. Re-authorize the session to enable transfers.`, "success");
-    $("auth-banner").hidden = false;
+    toast(`Added ${token.symbol}`, "success");
     await loadBalances();
   } catch (err) {
     toast(`Could not add token: ${err.message}`, "error");
   }
 });
 
-$("settings-form").addEventListener("submit", async (e) => {
+$("settings-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  try {
-    const res = await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({ defaultRecipient: $("default-recipient").value.trim() }),
-    });
-    toast("Default recipient saved", "success");
-    if (res.defaultRecipient && !$("recipient").value) {
-      $("recipient").value = res.defaultRecipient;
-    }
-  } catch (err) {
-    toast(`Could not save: ${err.message}`, "error");
-  }
+  const value = $("default-recipient").value.trim();
+  if (value && !isValidAddress(value)) return toast("Invalid recipient address", "error");
+  const recipient = value ? normalizeAddress(value) : null;
+  saveSetting("defaultRecipient", recipient);
+  toast(recipient ? "Default recipient saved" : "Default recipient cleared", "success");
+  if (recipient && !$("recipient").value) $("recipient").value = recipient;
 });
 
-$("auth-btn").onclick = startAuth;
+// On phones the Send card is a bottom sheet; its head opens and closes it.
+$("send-head").onclick = () => $("send-card").classList.toggle("open");
+$("connect-btn").onclick = connect;
+$("disconnect-btn").onclick = disconnect;
 $("refresh-btn").onclick = loadBalances;
 
 // ---------------------------------------------------------------------------
 // Boot
 
-(async () => {
-  try {
-    const s = await loadStatus();
-    if (!s.defaultRecipient) $("settings").open = true;
-    await loadBalances();
-  } catch (err) {
-    toast(`Failed to load: ${err.message}`, "error");
-  }
-})();
+const defaultRecipient = loadSetting("defaultRecipient", null);
+if (defaultRecipient) {
+  $("default-recipient").value = defaultRecipient;
+  $("recipient").value = defaultRecipient;
+}
+
+// probe() restores a connection made earlier in this browser without a popup.
+controller.probe().then(showAccount, () => showAccount(null));
