@@ -2,8 +2,11 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   status: null,
-  tokens: [],
-  collections: [], // NFT collections; select values are "nft:<index>"
+  assets: new Map(), // key -> token or NFT, rebuilt on every balance load
+  collections: [],
+  selection: new Map(), // key -> { amount } for what the Send card will send
+  expanded: new Set(), // collection keys whose NFTs are listed
+  sending: false,
   resolvedRecipient: null, // set when @username lookup succeeds
   authPolling: false,
 };
@@ -151,13 +154,58 @@ function startAuthPolling() {
 }
 
 // ---------------------------------------------------------------------------
-// Balances
+// Balances. Ticking a token or an NFT adds it to the Send card.
+
+const tokenKey = (address) => `token:${address}`;
+const nftKey = (address, tokenId) => `nft:${address}:${tokenId}`;
+const collectionKey = (c) => `${c.symbol}\n${c.name}`;
+
+// Swaps the text placeholder for an image once it scrolls into view, so a
+// collection of hundreds of NFTs only resolves the images on screen.
+// getSrc returns a URL or a promise of one.
+const pendingIcons = new WeakMap(); // placeholder -> load function
+const iconObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    iconObserver.unobserve(e.target);
+    pendingIcons.get(e.target)?.();
+    pendingIcons.delete(e.target);
+  }
+});
+
+function setIcon(fallback, getSrc, cls = "") {
+  pendingIcons.set(fallback, async () => {
+    const url = await getSrc();
+    if (!url) return;
+    const img = document.createElement("img");
+    img.className = cls;
+    img.alt = "";
+    img.onload = () => fallback.replaceWith(img);
+    img.src = url;
+  });
+  iconObserver.observe(fallback);
+}
+
+function tokenIcon(fallback, t) {
+  if (/^https?:\/\//.test(t.logoUrl ?? "")) setIcon(fallback, () => t.logoUrl);
+}
+
+const noPerm = (what) =>
+  `<span class="tag" title="The session cannot transfer this ${what} yet. Re-authorize to allow it.">no perm</span>`;
 
 async function loadBalances() {
   const box = $("balances");
   try {
     const res = await api("/api/balances");
-    state.tokens = res.tokens;
+    state.assets = new Map();
+    for (const t of res.tokens) state.assets.set(tokenKey(t.address), { kind: "token", ...t });
+    for (const c of res.collections) {
+      for (const n of c.tokens) {
+        state.assets.set(nftKey(n.address, n.tokenId), { kind: "nft", symbol: c.symbol, name: c.name, ...n });
+      }
+    }
+    for (const key of state.selection.keys()) if (!state.assets.has(key)) state.selection.delete(key);
+
     if (res.tokens.length === 0) {
       box.innerHTML = '<p class="muted">No token balances found.</p>';
     } else {
@@ -165,39 +213,39 @@ async function loadBalances() {
       let total = 0;
       for (const t of res.tokens) {
         total += t.usd ?? 0;
-        const row = document.createElement("div");
+        const row = document.createElement("label");
         row.className = "token-row";
-        const abbr = esc(t.symbol.slice(0, 3));
         row.innerHTML = `
-          <span class="token-fallback">${abbr}</span>
+          <input type="checkbox" data-key="${esc(tokenKey(t.address))}" />
+          <span class="token-fallback">${esc(t.symbol.slice(0, 3))}</span>
           <div class="token-meta">
-            <div class="sym">${esc(t.symbol)}${t.transferAllowed ? "" : '<span class="tag" title="The session cannot transfer this token yet. Re-authorize to allow it.">no perm</span>'}</div>
+            <div class="sym">${esc(t.symbol)}${t.transferAllowed ? "" : noPerm("token")}</div>
             <div class="nm">${esc(t.name)}</div>
           </div>
           <div class="token-nums">
             <div class="bal">${fmtBalance(t.balance)}</div>
             <div class="usd">${fmtUsd(t.usd)}</div>
           </div>`;
-        if (/^https?:\/\//.test(t.logoUrl ?? "")) {
-          const img = document.createElement("img");
-          img.alt = "";
-          img.onload = () => row.firstElementChild.replaceWith(img);
-          img.src = t.logoUrl;
-        }
-        row.style.cursor = "pointer";
-        row.onclick = () => {
-          $("token-select").value = t.address;
-          updateAssetInputs();
-        };
+        tokenIcon(row.querySelector(".token-fallback"), t);
         box.appendChild(row);
       }
       $("total-usd").textContent = total > 0 ? `≈ ${fmtUsd(total)}` : "";
     }
     renderNfts(res);
-    renderTokenSelect();
+    syncSelection();
   } catch (err) {
-    box.innerHTML = `<p class="muted">${err.message}</p>`;
+    box.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
   }
+}
+
+$("balances").addEventListener("change", (e) => toggle([e.target.dataset.key], e.target.checked));
+
+function toggle(keys, on) {
+  for (const key of keys) {
+    if (on && !state.selection.has(key)) state.selection.set(key, { amount: "" });
+    if (!on) state.selection.delete(key);
+  }
+  syncSelection();
 }
 
 // ---------------------------------------------------------------------------
@@ -279,127 +327,145 @@ function renderNfts(res) {
     return;
   }
   box.innerHTML = "";
-  res.collections.forEach((c, i) => {
-    const row = document.createElement("div");
-    row.className = "token-row";
+  for (const c of res.collections) {
+    const ckey = collectionKey(c);
+    const keys = c.tokens.map((t) => nftKey(t.address, t.tokenId));
+    const open = state.expanded.has(ckey);
     const n = c.tokens.length;
     const allowed = c.tokens.every((t) => t.transferAllowed);
+    const row = document.createElement("div");
+    row.className = "token-row collection";
     row.innerHTML = `
+      <input type="checkbox" class="all" title="Select all" />
       <span class="token-fallback">${esc(c.symbol.slice(0, 3))}</span>
       <div class="token-meta">
-        <div class="sym">${esc(c.symbol)}${allowed ? "" : '<span class="tag" title="The session cannot transfer this collection yet. Re-authorize to allow it.">no perm</span>'}</div>
+        <div class="sym">${esc(c.symbol)}${allowed ? "" : noPerm("collection")}</div>
         <div class="nm">${esc(c.name)}</div>
       </div>
       <div class="token-nums">
         <div class="bal">${n}</div>
         <div class="usd">${n === 1 ? "NFT" : "NFTs"}</div>
-      </div>`;
-    nftImage(c.tokens[0].address, c.tokens[0].tokenId).then((src) => {
-      if (!src) return;
-      const img = document.createElement("img");
-      img.className = "nft";
-      img.alt = "";
-      img.onload = () => row.firstElementChild.replaceWith(img);
-      img.src = src;
-    });
-    row.style.cursor = "pointer";
+      </div>
+      <span class="caret">${open ? "▾" : "▸"}</span>`;
+    setIcon(row.querySelector(".token-fallback"), () => nftImage(c.tokens[0].address, c.tokens[0].tokenId), "nft");
+    const all = row.querySelector(".all");
+    all.dataset.group = keys.join(" ");
+    all.onclick = (e) => e.stopPropagation();
+    all.onchange = (e) => {
+      e.stopPropagation();
+      toggle(keys, all.checked);
+    };
     row.onclick = () => {
-      $("token-select").value = `nft:${i}`;
-      updateAssetInputs();
+      if (open) state.expanded.delete(ckey);
+      else state.expanded.add(ckey);
+      renderNfts(res);
+      syncSelection();
     };
     box.appendChild(row);
-  });
-}
 
-function updateNftPreview() {
-  const a = selectedAsset();
-  const img = $("nft-preview");
-  const nft = a?.kind === "nft" ? selectedNft(a) : null;
-  img.hidden = true;
-  if (!nft) return;
-  nftImage(nft.address, nft.tokenId).then((src) => {
-    // The selection may have moved on while the image loaded.
-    const current = selectedAsset();
-    const now = current?.kind === "nft" ? selectedNft(current) : null;
-    if (!src || !now || now.address !== nft.address || now.tokenId !== nft.tokenId) return;
-    img.src = src;
-    img.hidden = false;
-  });
-}
-
-function renderTokenSelect() {
-  const sel = $("token-select");
-  const prev = sel.value;
-  sel.innerHTML = "";
-  const tokens = document.createElement("optgroup");
-  tokens.label = "Tokens";
-  for (const t of state.tokens) {
-    const opt = document.createElement("option");
-    opt.value = t.address;
-    opt.textContent = `${t.symbol}  ${fmtBalance(t.balance)}`;
-    tokens.appendChild(opt);
+    if (!open) continue;
+    const contracts = new Set(c.tokens.map((t) => t.address)).size;
+    const list = document.createElement("div");
+    list.className = "nft-items";
+    for (const t of c.tokens) {
+      const item = document.createElement("label");
+      item.className = "token-row";
+      item.innerHTML = `
+        <input type="checkbox" data-key="${esc(nftKey(t.address, t.tokenId))}" />
+        <span class="token-fallback">#</span>
+        <div class="token-meta">
+          <div class="sym">#${esc(t.tokenId)}</div>
+          ${contracts > 1 ? `<div class="nm mono">${short(t.address)}</div>` : ""}
+        </div>`;
+      setIcon(item.querySelector(".token-fallback"), () => nftImage(t.address, t.tokenId), "nft");
+      list.appendChild(item);
+    }
+    box.appendChild(list);
   }
-  if (tokens.childElementCount) sel.appendChild(tokens);
-  const nfts = document.createElement("optgroup");
-  nfts.label = "NFTs";
-  state.collections.forEach((c, i) => {
-    const opt = document.createElement("option");
-    opt.value = `nft:${i}`;
-    opt.textContent = `${c.symbol}  ×${c.tokens.length}`;
-    nfts.appendChild(opt);
-  });
-  if (nfts.childElementCount) sel.appendChild(nfts);
-  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
-  updateAssetInputs();
 }
 
-// The selected asset: an ERC20 token (with balance) or an NFT collection.
-function selectedAsset() {
-  const value = $("token-select").value;
-  if (value.startsWith("nft:")) {
-    const c = state.collections[Number(value.slice(4))];
-    return c ? { kind: "nft", ...c } : null;
+$("nfts").addEventListener("change", (e) => {
+  if (e.target.dataset.key) toggle([e.target.dataset.key], e.target.checked);
+});
+
+// Brings every checkbox and the Send card in line with state.selection.
+function syncSelection() {
+  for (const box of document.querySelectorAll("input[data-key]")) {
+    box.checked = state.selection.has(box.dataset.key);
   }
-  const t = state.tokens.find((t) => t.address === value);
-  return t ? { kind: "token", ...t } : null;
-}
-
-// The chosen NFT within the selected collection, as { address, tokenId, transferAllowed }.
-function selectedNft(collection) {
-  return collection.tokens[Number($("token-id-select").value)] ?? null;
-}
-
-function updateAssetInputs() {
-  const a = selectedAsset();
-  const isNft = a?.kind === "nft";
-  $("amount-label").hidden = isNft;
-  $("amount").required = !isNft;
-  $("token-id-label").hidden = !isNft;
-  if (isNft) {
-    const sel = $("token-id-select");
-    const prevKey = selectedNft(a) ? `${selectedNft(a).address}:${selectedNft(a).tokenId}` : null;
-    const contracts = new Set(a.tokens.map((t) => t.address)).size;
-    sel.innerHTML = "";
-    a.tokens.forEach((t, i) => {
-      const opt = document.createElement("option");
-      opt.value = String(i);
-      opt.textContent = `#${t.tokenId}${contracts > 1 ? `  (${short(t.address)})` : ""}`;
-      if (`${t.address}:${t.tokenId}` === prevKey) opt.selected = true;
-      sel.appendChild(opt);
-    });
+  for (const box of document.querySelectorAll("input[data-group]")) {
+    const keys = box.dataset.group.split(" ");
+    const picked = keys.filter((k) => state.selection.has(k)).length;
+    box.checked = picked === keys.length;
+    box.indeterminate = picked > 0 && picked < keys.length;
   }
-  updateNftPreview();
-  updateAmountUsd();
+  renderSelection();
 }
 
-function updateAmountUsd() {
-  const t = selectedAsset();
-  const amount = parseFloat($("amount").value);
-  const el = $("amount-usd");
-  if (t?.kind === "token" && t.usd !== null && !Number.isNaN(amount) && Number(t.balance) > 0) {
-    el.textContent = `≈ ${fmtUsd((amount * t.usd) / Number(t.balance))}`;
-  } else {
-    el.textContent = "";
+// ---------------------------------------------------------------------------
+// Send card: one line per selected asset, an amount for each token.
+
+function tokenUsd(t, amount) {
+  const n = parseFloat(amount);
+  if (t.usd === null || Number.isNaN(n) || !(Number(t.balance) > 0)) return null;
+  return (n * t.usd) / Number(t.balance);
+}
+
+function renderSelection() {
+  const box = $("selection");
+  box.innerHTML = "";
+  const n = state.selection.size;
+  $("send-btn").disabled = n === 0 || state.sending;
+  if (!state.sending) $("send-btn").textContent = n > 1 ? `Send ${n} items` : "Send";
+  if (n === 0) {
+    box.innerHTML = '<p class="muted small">Tick tokens or NFTs to add them here.</p>';
+    return;
+  }
+  for (const [key, sel] of state.selection) {
+    const a = state.assets.get(key);
+    const row = document.createElement("div");
+    row.className = "token-row";
+    if (a.kind === "token") {
+      row.innerHTML = `
+        <span class="token-fallback">${esc(a.symbol.slice(0, 3))}</span>
+        <div class="token-meta">
+          <div class="sym">${esc(a.symbol)}</div>
+          <div class="nm usd-hint"></div>
+        </div>
+        <input class="amt" placeholder="0.0" inputmode="decimal" autocomplete="off" spellcheck="false" />
+        <button type="button" class="ghost max">MAX</button>`;
+      tokenIcon(row.querySelector(".token-fallback"), a);
+      const input = row.querySelector(".amt");
+      const hint = row.querySelector(".usd-hint");
+      const update = () => {
+        sel.amount = input.value.trim();
+        const usd = tokenUsd(a, sel.amount);
+        hint.textContent = usd === null ? `${fmtBalance(a.balance)} available` : `≈ ${fmtUsd(usd)}`;
+      };
+      input.value = sel.amount;
+      input.oninput = update;
+      row.querySelector(".max").onclick = () => {
+        input.value = a.balance;
+        update();
+      };
+      update();
+    } else {
+      row.innerHTML = `
+        <span class="token-fallback">#</span>
+        <div class="token-meta">
+          <div class="sym">${esc(a.symbol)} #${esc(a.tokenId)}</div>
+          <div class="nm">${esc(a.name)}</div>
+        </div>`;
+      setIcon(row.querySelector(".token-fallback"), () => nftImage(a.address, a.tokenId), "nft");
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ghost remove";
+    remove.title = "Remove";
+    remove.textContent = "×";
+    remove.onclick = () => toggle([key], false);
+    row.appendChild(remove);
+    box.appendChild(row);
   }
 }
 
@@ -438,42 +504,41 @@ function finalRecipient() {
 // ---------------------------------------------------------------------------
 // Send flow
 
-// What the form would send right now: the asset, the request body and a label.
+// What the form would send right now: one entry per selected asset.
 function pendingTransfer() {
-  const a = selectedAsset();
   const recipient = finalRecipient();
-  if (!a) return { error: "Pick an asset" };
+  if (state.selection.size === 0) return { error: "Tick something to send" };
   if (!recipient) return { error: "Recipient not resolved yet" };
-  if (a.kind === "nft") {
-    const nft = selectedNft(a);
-    if (!nft) return { error: "Pick a token ID" };
-    return {
-      asset: { ...a, transferAllowed: nft.transferAllowed },
-      recipient,
-      body: { address: nft.address, tokenId: nft.tokenId, recipient },
-      label: `${a.symbol} #${nft.tokenId}`,
-    };
+  const items = [];
+  for (const [key, sel] of state.selection) {
+    const a = state.assets.get(key);
+    if (a.kind === "nft") {
+      items.push({ asset: a, label: `${a.symbol} #${a.tokenId}`, body: { address: a.address, tokenId: a.tokenId } });
+      continue;
+    }
+    if (!sel.amount) return { error: `Enter an amount for ${a.symbol}` };
+    const usd = tokenUsd(a, sel.amount);
+    items.push({
+      asset: a,
+      label: `${sel.amount} ${a.symbol}${usd === null ? "" : ` (≈ ${fmtUsd(usd)})`}`,
+      body: { address: a.address, amount: sel.amount },
+    });
   }
-  const amount = $("amount").value.trim();
-  if (!amount) return { error: "Enter an amount" };
-  const usd =
-    a.usd !== null && Number(a.balance) > 0
-      ? ` (≈ ${fmtUsd((parseFloat(amount) * a.usd) / Number(a.balance))})`
-      : "";
-  return { asset: a, recipient, body: { address: a.address, amount, recipient }, label: `${amount} ${a.symbol}`, usd };
+  return { items, recipient, body: { recipient, transfers: items.map((i) => i.body) } };
 }
 
 $("send-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const p = pendingTransfer();
   if (p.error) return toast(p.error, "error");
-  if (!p.asset.transferAllowed) {
+  const blocked = [...new Set(p.items.filter((i) => !i.asset.transferAllowed).map((i) => i.asset.symbol))];
+  if (blocked.length) {
     $("auth-banner").hidden = false;
-    return toast(`The session cannot transfer ${p.asset.symbol} yet. Click "Authorize session" first.`, "error");
+    return toast(`The session cannot transfer ${blocked.join(", ")} yet. Click "Authorize session" first.`, "error");
   }
-  $("c-token").textContent = `${p.asset.symbol} (${p.asset.name})`;
-  $("c-amount").textContent = `${p.label}${p.usd ?? ""}`;
+  $("c-items").innerHTML = p.items.map((i) => `<li>${esc(i.label)}</li>`).join("");
   $("c-recipient").textContent = p.recipient;
+  $("c-atomic").hidden = p.items.length < 2;
   $("confirm-modal").showModal();
 });
 
@@ -483,21 +548,22 @@ $("c-confirm").onclick = async () => {
   const p = pendingTransfer();
   $("confirm-modal").close();
   if (p.error) return toast(p.error, "error");
-  const btn = $("send-btn");
-  btn.disabled = true;
-  btn.textContent = "Sending… (waiting for confirmation)";
+  state.sending = true;
+  $("send-btn").disabled = true;
+  $("send-btn").textContent = "Sending… (waiting for confirmation)";
+  const what = p.items.length === 1 ? p.items[0].label : `${p.items.length} items`;
   try {
     const res = await api("/api/transfer", { method: "POST", body: JSON.stringify(p.body) });
     if (res.txHash) {
       toast(
-        `Sent ${p.label} ✓ <a href="https://voyager.online/tx/${res.txHash}" target="_blank" rel="noopener">View on Voyager ↗</a>`,
+        `Sent ${esc(what)} ✓ <a href="https://voyager.online/tx/${esc(res.txHash)}" target="_blank" rel="noopener">View on Voyager ↗</a>`,
         "success",
         true,
       );
     } else {
       toast(`Transfer submitted (no tx hash returned)`, "success");
     }
-    $("amount").value = "";
+    state.selection.clear();
     setTimeout(loadBalances, 4000);
   } catch (err) {
     if (err.body?.needsReauth) {
@@ -508,22 +574,10 @@ $("c-confirm").onclick = async () => {
       toast(`Transfer failed: ${err.message}${hint}`, "error");
     }
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Send";
+    state.sending = false;
+    syncSelection();
   }
 };
-
-$("max-btn").onclick = () => {
-  const t = selectedAsset();
-  if (t?.kind === "token") {
-    $("amount").value = t.balance;
-    updateAmountUsd();
-  }
-};
-
-$("amount").addEventListener("input", updateAmountUsd);
-$("token-select").addEventListener("change", updateAssetInputs);
-$("token-id-select").addEventListener("change", updateNftPreview);
 
 // ---------------------------------------------------------------------------
 // Add token & settings

@@ -60,25 +60,12 @@
     <section class="card" id="send-card">
       <div class="card-head"><h2>Send</h2></div>
       <form id="send-form">
-        <label>Asset
-          <select id="token-select"></select>
-        </label>
-        <label id="amount-label">Amount
-          <div class="amount-row">
-            <input id="amount" placeholder="0.0" inputmode="decimal" autocomplete="off" spellcheck="false" required />
-            <button type="button" id="max-btn" class="ghost">MAX</button>
-          </div>
-          <span id="amount-usd" class="muted small"></span>
-        </label>
-        <label id="token-id-label" hidden>Token ID
-          <select id="token-id-select"></select>
-          <img id="nft-preview" class="nft-preview" alt="" hidden />
-        </label>
+        <div id="selection" class="token-list selection"></div>
         <label>Recipient
           <input id="recipient" placeholder="0x… or @username" autocomplete="off" spellcheck="false" required />
           <span id="recipient-hint" class="muted small"></span>
         </label>
-        <button type="submit" class="primary" id="send-btn">Send</button>
+        <button type="submit" class="primary" id="send-btn" disabled>Send</button>
       </form>
 
       <details id="settings">
@@ -93,11 +80,11 @@
 
   <dialog id="confirm-modal">
     <h3>Confirm transfer</h3>
+    <ul id="c-items"></ul>
     <dl>
-      <dt>Asset</dt><dd id="c-token"></dd>
-      <dt>Amount</dt><dd id="c-amount"></dd>
       <dt>Recipient</dt><dd id="c-recipient" class="mono"></dd>
     </dl>
+    <p id="c-atomic" class="muted small">All items go in one transaction. If one fails, none are sent.</p>
     <div class="modal-actions">
       <button id="c-cancel" class="ghost">Cancel</button>
       <button id="c-confirm" class="primary">Confirm &amp; send</button>

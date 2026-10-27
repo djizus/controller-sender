@@ -128,15 +128,19 @@ main {
   flex-shrink: 0;
 }
 .token-row img.nft { border-radius: 6px; object-fit: cover; }
-.nft-preview {
-  display: block;
-  width: 140px; height: 140px;
-  margin-top: 0.5rem;
-  border-radius: 8px;
-  object-fit: contain;
-  background: var(--card-2);
-  border: 1px solid var(--border);
+input[type="checkbox"] {
+  width: auto; margin: 0; flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
+label.token-row, .token-row.collection { cursor: pointer; }
+.caret { color: var(--muted); width: 1rem; text-align: center; }
+.nft-items { display: flex; flex-direction: column; gap: 0.35rem; margin-left: 1.6rem; }
+#send-card { position: sticky; top: 1rem; align-self: start; }
+.selection { margin-bottom: 0.9rem; max-height: 50vh; overflow-y: auto; }
+.selection .amt { width: 8rem; margin-top: 0; }
+button.remove { padding: 0.35rem 0.6rem; }
+dialog ul { margin: 0 0 1rem; padding-left: 1.2rem; max-height: 40vh; overflow-y: auto; }
 .token-meta { flex: 1; min-width: 0; }
 .token-meta .sym { font-weight: 650; }
 .token-meta .nm { font-size: 0.75rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -163,9 +167,6 @@ input, select {
   font-family: inherit;
 }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
-
-.amount-row { display: flex; gap: 0.4rem; align-items: center; }
-.amount-row input { flex: 1; }
 
 button {
   border: none;

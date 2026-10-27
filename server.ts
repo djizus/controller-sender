@@ -6,7 +6,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -437,13 +438,6 @@ async function tokenUri(contract: string, tokenId: bigint): Promise<string | nul
   return uri;
 }
 
-async function ownerOf(contract: string, tokenId: bigint): Promise<string | null> {
-  const [result] = await rpcCalls([
-    { to: contract, selector: SELECTOR.ownerOf, calldata: u256Calldata(tokenId) },
-  ]);
-  return result?.[0] ? normalizeAddress(result[0]) : null;
-}
-
 function formatUnits(raw: bigint, decimals: number): string {
   const base = 10n ** BigInt(decimals);
   const int = raw / base;
@@ -702,68 +696,93 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return sendJson(res, state.status === "failed" ? 502 : 200, state);
     }
 
-    // Body: { address, recipient, amount } for an ERC20 token, or
-    // { address, recipient, tokenId } for an NFT.
+    // Body: { recipient, transfers: [...] } where each transfer is
+    // { address, amount } for an ERC20 token or { address, tokenId } for an NFT.
+    // All transfers run as one multicall, so they succeed or fail together.
     case "POST /api/transfer": {
       const body = await readBody(req);
-      const contract = normalizeAddress(String(body.address ?? ""));
       const recipientInput = String(body.recipient ?? "").trim();
+      const items: any[] = Array.isArray(body.transfers) ? body.transfers : [];
 
       if (!isValidAddress(recipientInput)) {
         return sendJson(res, 400, { error: "Invalid recipient address" });
       }
+      if (items.length === 0) return sendJson(res, 400, { error: "Nothing to send" });
       const recipient = normalizeAddress(recipientInput);
       const session = await getSenderSession();
       if (!session) {
         return sendJson(res, 409, { needsReauth: true, error: "No active sender session" });
       }
 
-      let entrypoint: string;
-      let calldata: string;
-      let label: string;
-      if (body.tokenId !== undefined) {
-        let tokenId: bigint;
-        try {
-          tokenId = BigInt(String(body.tokenId));
-        } catch {
-          return sendJson(res, 400, { error: "Invalid token ID" });
+      const tokens = await allTokens();
+      const calls: { contractAddress: string; entrypoint: string; calldata: string[] }[] = [];
+      const labels: string[] = [];
+      const nfts: { contract: string; tokenId: bigint }[] = [];
+      for (const item of items) {
+        const contract = normalizeAddress(String(item?.address ?? ""));
+        if (item?.tokenId !== undefined) {
+          let tokenId: bigint;
+          try {
+            tokenId = BigInt(String(item.tokenId));
+          } catch {
+            return sendJson(res, 400, { error: "Invalid token ID" });
+          }
+          if (tokenId < 0n) return sendJson(res, 400, { error: "Invalid token ID" });
+          nfts.push({ contract, tokenId });
+          calls.push({
+            contractAddress: contract,
+            entrypoint: "transfer_from",
+            calldata: [session.address, recipient, `u256:${tokenId}`],
+          });
+          labels.push(`NFT #${tokenId} of ${contract}`);
+        } else {
+          const amountInput = String(item?.amount ?? "").trim();
+          const token = tokens.find((t) => t.address === contract);
+          if (!token) return sendJson(res, 400, { error: "Unknown token" });
+          let raw: bigint;
+          try {
+            raw = parseAmount(amountInput, token.decimals);
+          } catch (err) {
+            return sendJson(res, 400, { error: `${token.symbol}: ${(err as Error).message}` });
+          }
+          if (raw <= 0n) return sendJson(res, 400, { error: `${token.symbol}: amount must be greater than zero` });
+          calls.push({ contractAddress: contract, entrypoint: "transfer", calldata: [recipient, `u256:${raw}`] });
+          labels.push(`${amountInput} ${token.symbol}`);
         }
-        if (tokenId < 0n) return sendJson(res, 400, { error: "Invalid token ID" });
-        if ((await ownerOf(contract, tokenId)) !== session.address) {
-          return sendJson(res, 400, { error: "The controller does not own this NFT" });
-        }
-        entrypoint = "transfer_from";
-        calldata = `${session.address},${recipient},u256:${tokenId}`;
-        label = `NFT #${tokenId} of ${contract}`;
-      } else {
-        const amountInput = String(body.amount ?? "").trim();
-        const token = (await allTokens()).find((t) => t.address === contract);
-        if (!token) return sendJson(res, 400, { error: "Unknown token" });
-        let raw: bigint;
-        try {
-          raw = parseAmount(amountInput, token.decimals);
-        } catch (err) {
-          return sendJson(res, 400, { error: (err as Error).message });
-        }
-        if (raw <= 0n) return sendJson(res, 400, { error: "Amount must be greater than zero" });
-        entrypoint = "transfer";
-        calldata = `${recipient},u256:${raw}`;
-        label = `${amountInput} ${token.symbol}`;
       }
 
-      if (!sessionAllows(session, contract, entrypoint)) {
-        return sendJson(res, 409, {
-          needsReauth: true,
-          error: `The session has no ${entrypoint} permission for this contract. Re-authorize.`,
-        });
+      for (const call of calls) {
+        if (!sessionAllows(session, call.contractAddress, call.entrypoint)) {
+          return sendJson(res, 409, {
+            needsReauth: true,
+            error: `The session has no ${call.entrypoint} permission for ${call.contractAddress}. Re-authorize.`,
+          });
+        }
+      }
+
+      const owners = await rpcCalls(
+        nfts.map((n) => ({ to: n.contract, selector: SELECTOR.ownerOf, calldata: u256Calldata(n.tokenId) })),
+      );
+      const notOwned = nfts.find((_, i) => !owners[i]?.[0] || normalizeAddress(owners[i]![0]) !== session.address);
+      if (notOwned) {
+        return sendJson(res, 400, { error: `The controller does not own NFT #${notOwned.tokenId}` });
       }
 
       // Always self-pay gas. The paymaster does not subsidize most plain transfers.
-      const result = await runController(
-        ["execute", contract, entrypoint, calldata,
-         "--wait", "--timeout", "120", "--chain-id", CHAIN_ID, "--no-paymaster"],
-        { timeoutMs: 180_000 },
-      );
+      const dir = await mkdtemp(join(tmpdir(), "controller-sender-"));
+      const callsFile = join(dir, "calls.json");
+      let result: CliResult;
+      try {
+        await writeFile(callsFile, JSON.stringify({ calls }));
+        result = await runController(
+          ["execute", "--file", callsFile,
+           "--wait", "--timeout", "120", "--chain-id", CHAIN_ID, "--no-paymaster"],
+          { timeoutMs: 180_000 },
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+      const label = labels.join(", ");
       if (result.status !== "success") {
         console.error(
           `[${new Date().toISOString()}] [transfer FAILED] ${label} -> ${recipient}\n`,

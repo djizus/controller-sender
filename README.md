@@ -42,9 +42,11 @@ Cartridge approval page. The CLI pre-fills and locks the username on that page. 
 with your passkey. After you add a token or receive an NFT from a new collection,
 authorize once more.
 
-**Send.** Pick a token or an NFT collection. For a token, enter an amount. For an NFT,
-pick the token ID. Enter a recipient and confirm. The recipient can be a raw address or
-`@username`. Gas is paid from the controller.
+**Send.** Tick the tokens and NFTs you want to send. Click an NFT collection to list its
+NFTs. Its own checkbox selects all of them. Each ticked item appears in the Send card,
+where you enter an amount for every token. Enter a recipient and confirm. The recipient
+can be a raw address or `@username`. Everything goes out in one transaction, so if one
+transfer fails, none are sent. Gas is paid from the controller.
 
 **Settings.** Save a default recipient. It is stored in `config.json`.
 
@@ -64,10 +66,12 @@ pick the token ID. Enter a recipient and confirm. The recipient can be a raw add
   `data:image/` or `https` images only. IPFS links are fetched by the server through
   Pinata's public gateway, because public gateways refuse browser requests. The gateway
   host is fixed, so a token contract can only choose the path.
-- A token transfer runs `controller execute <token> transfer <recipient>,u256:<amount> --wait --no-paymaster`.
-  An NFT transfer runs `controller execute <collection> transfer_from <controller>,<recipient>,u256:<id>`
-  with the same flags. The server refuses either unless the active session carries the
-  matching policy for that contract.
+- A send writes the calls to a temporary file and runs
+  `controller execute --file <calls.json> --wait --no-paymaster` as one multicall. A token
+  is a `transfer(recipient, u256:amount)` call and an NFT is a
+  `transfer_from(controller, recipient, u256:id)` call. The server refuses the whole send
+  unless the active session carries the matching policy for every contract and the
+  controller owns every NFT.
 
 ## Security model
 
