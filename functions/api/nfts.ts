@@ -25,7 +25,7 @@ export async function onRequestGet({ request, env }: { request: Request; env: En
   if (hit) return hit;
 
   const baseUrl = env.STARKSCAN_API_KEY ? "https://api.starkscan.co" : "https://starkscan.co";
-  const byKey = new Map<string, { address: string; tokenId: string; symbol: string | null; name: string | null }>();
+  const byKey = new Map<string, { address: string; tokenId: string }>();
   let cursor: string | null = null;
   do {
     const url = new URL(`${baseUrl}/v1/SN_MAIN/address/${address}/transfers`);
@@ -44,14 +44,7 @@ export async function onRequestGet({ request, env }: { request: Request; env: En
       const contract = `0x${String(t.tokenAddress).slice(2).toLowerCase().replace(/^0+/, "")}`;
       const tokenId = BigInt(t.tokenId).toString();
       const key = `${contract}:${tokenId}`;
-      if (!byKey.has(key)) {
-        byKey.set(key, {
-          address: contract,
-          tokenId,
-          symbol: typeof t.tokenSymbol === "string" ? t.tokenSymbol : null,
-          name: typeof t.tokenName === "string" ? t.tokenName : null,
-        });
-      }
+      byKey.set(key, { address: contract, tokenId });
     }
     cursor = page.nextCursor ?? null;
   } while (cursor);

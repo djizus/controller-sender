@@ -9,11 +9,13 @@ const LOOKUP_URL = "https://api.cartridge.gg/lookup";
 
 // starknet_keccak of the entrypoint names.
 const SELECTOR = {
-  balanceOf: "0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e",
+  balanceOf: "0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e", // camelCase
+  balance_of: "0x35a73cd311a05d46deda634c5ee045db92f811b4e74bca4437fcb5302b7af33",
   decimals: "0x4c4fb1ab068f6039d5780c68dd0fa2f8742cceb3426d19667778ca7f3518a9",
   symbol: "0x216b05c387bab9ac31918a3e61672f4618601f3c598a2f3f2710f37053e1ea4",
   name: "0x361458367e696363fbcc70777d07ebbd2394e89fd0adcaf147faccd1d294d60",
   ownerOf: "0x3552df12bdc6089cf963c40c4cf56fbfd4bd14680c244d1c5494c2790f1ea5c", // owner_of
+  tokenOfOwnerByIndex: "0x3f2387c5fc10a274c9063decad17252bdc446229607c764d106638ff3cdedd5", // token_of_owner_by_index
   tokenUri: "0x226ad7e84c1fe08eb4c525ed93cccadf9517670341304571e66f7c4f95cbe54", // token_uri
   tokenURI: "0x12a7823b0c6bee58f8c694888f32f862c6584caa8afa0242de046d298ba684d", // legacy camelCase
 };
@@ -288,7 +290,11 @@ function shortAddress(address: string): string {
 }
 
 // Candidates come from the transfer index; owner_of decides what is still held.
-// Sorted by contract, then token id.
+// The index can miss tokens: it drops the high half of token ids above 128 bits.
+// When it finds fewer tokens than balance_of reports, a contract that has
+// token_of_owner_by_index lists the owner's tokens itself.
+// Collection names come from each contract's name() and symbol(), because the
+// index has none for many new contracts. Sorted by contract, then token id.
 export async function getHeldNfts(address: string): Promise<HeldNft[]> {
   const res = await fetch(`/api/nfts?address=${address}`);
   const body = await res.json();
@@ -296,26 +302,58 @@ export async function getHeldNfts(address: string): Promise<HeldNft[]> {
   const candidates = (body.candidates as any[]).map((c) => ({
     address: String(c.address),
     tokenId: BigInt(c.tokenId),
-    symbol: typeof c.symbol === "string" ? c.symbol : null,
-    name: typeof c.name === "string" ? c.name : null,
   }));
   const owners = await rpcCalls(
     candidates.map((c) => ({ to: c.address, selector: SELECTOR.ownerOf, calldata: u256Calldata(c.tokenId) })),
   );
-  const held: HeldNft[] = [];
-  candidates.forEach((c, i) => {
+  const verified = candidates.filter((_, i) => {
     const owner = owners[i]?.[0];
-    if (!owner || normalizeAddress(owner) !== address) return;
-    held.push({
-      address: c.address,
-      tokenId: c.tokenId,
-      symbol: c.symbol ?? shortAddress(c.address),
-      name: c.name ?? "Unknown collection",
-    });
+    return owner !== undefined && normalizeAddress(owner) === address;
   });
-  return held.sort(
-    (a, b) => a.address.localeCompare(b.address) || (a.tokenId < b.tokenId ? -1 : a.tokenId > b.tokenId ? 1 : 0),
+  const contracts = [...new Set(candidates.map((c) => c.address))];
+  const balances = await rpcCalls(
+    contracts.flatMap((to) => [
+      { to, selector: SELECTOR.balance_of, calldata: [address] },
+      { to, selector: SELECTOR.balanceOf, calldata: [address] },
+    ]),
   );
+  const held: { address: string; tokenId: bigint }[] = [];
+  await Promise.all(
+    contracts.map(async (contract, i) => {
+      const found = verified.filter((c) => c.address === contract);
+      const balance = u256FromResult(balances[2 * i] ?? balances[2 * i + 1]) ?? 0n;
+      if (BigInt(found.length) >= balance || balance > 10_000n) return held.push(...found);
+      const ids = await rpcCalls(
+        Array.from({ length: Number(balance) }, (_, n) => ({
+          to: contract,
+          selector: SELECTOR.tokenOfOwnerByIndex,
+          calldata: [address, ...u256Calldata(BigInt(n))],
+        })),
+      );
+      const listed = ids.map(u256FromResult);
+      if (listed.some((id) => id === null)) return held.push(...found);
+      held.push(...listed.map((tokenId) => ({ address: contract, tokenId: tokenId! })));
+    }),
+  );
+  const heldContracts = [...new Set(held.map((c) => c.address))];
+  const labels = await rpcCalls(
+    heldContracts.flatMap((to) => [
+      { to, selector: SELECTOR.symbol, calldata: [] },
+      { to, selector: SELECTOR.name, calldata: [] },
+    ]),
+  );
+  const byContract = new Map(
+    heldContracts.map((c, i) => [
+      c,
+      {
+        symbol: decodeStringResult(labels[2 * i]) ?? shortAddress(c),
+        name: decodeStringResult(labels[2 * i + 1]) ?? "Unknown collection",
+      },
+    ]),
+  );
+  return held
+    .map((c) => ({ ...c, ...byContract.get(c.address)! }))
+    .sort((a, b) => a.address.localeCompare(b.address) || (a.tokenId < b.tokenId ? -1 : a.tokenId > b.tokenId ? 1 : 0));
 }
 
 // token_uri is often a data: URI with the whole metadata (Cartridge games render

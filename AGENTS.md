@@ -38,8 +38,14 @@ feature map. Update them in the change that adds, moves or removes a feature.
 - NFTs come from Starkscan's transfer index. Every ERC721 token the controller ever
   received is a candidate, and `owner_of` on-chain decides which ones it still holds, so a
   stale index can hide an NFT but never show one that is gone. Starkscan returns 403 to
-  requests with a browser Origin, so `functions/api/nfts.ts` fetches it. NFTs are grouped
-  by collection name, since one collection can span several contracts.
+  requests with a browser Origin, so `functions/api/nfts.ts` fetches it.
+- Starkscan drops the high half of token ids above 128 bits (Musical Onchain Beasts use
+  them). When the verified count for a contract is below its `balance_of`, the page lists
+  the owner's tokens with `token_of_owner_by_index` if the contract has it.
+- Collection names and symbols come from each contract's `name()` and `symbol()`. NFTs are
+  grouped by name and symbol, since one collection can span several contracts.
+- Cartridge's RPC answers only allowed origins. `controller.realms.party` and a browser on
+  `localhost` work. `127.0.0.1`, `*.pages.dev` previews and scripts get 401.
 - NFT images come from `token_uri`. The browser decodes the metadata and shows
   `data:image/` or `https` images only, loading each when it scrolls into view. IPFS links
   load from `gateway.pinata.cloud`, which sends CORS headers. Every public gateway tested
@@ -69,7 +75,7 @@ only `x.cartridge.gg`, and forbids framing the site.
 
 ```bash
 npm install
-npm run dev      # build, then wrangler pages dev on http://127.0.0.1:3210
+npm run dev      # build, then wrangler pages dev; open http://localhost:3210
 npm run check    # tsc --noEmit
 npm run deploy   # build, then wrangler pages deploy
 ```
