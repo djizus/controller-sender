@@ -9,6 +9,7 @@ import {
   parseAmount,
   readToken,
   tokenUri,
+  shortAddress,
   u256Calldata,
   waitForTransaction,
 } from "./chain.ts";
@@ -134,7 +135,7 @@ $("address").onclick = () => {
 
 const tokenKey = (address) => `token:${address}`;
 const nftKey = (address, tokenId) => `nft:${address}:${tokenId}`;
-const collectionKey = (c) => `${c.symbol}\n${c.name}`;
+const collectionKey = (c) => `${c.symbol}\n${c.name}\n${c.classHash}`;
 
 // Swaps the text placeholder for an image once it scrolls into view, so a
 // collection of hundreds of NFTs only resolves the images on screen.
@@ -229,16 +230,22 @@ async function loadBalances() {
 
 $("balances").addEventListener("change", (e) => toggle([e.target.dataset.key], e.target.checked));
 
-// A collection is a symbol and name. One collection can span several contracts
-// (seasonal deployments, per-type chests), so each token carries its contract.
+// A collection is a symbol, a name and the contract code. One collection can
+// span several contracts (seasonal deployments, per-type chests), so each token
+// carries its contract. Collections that share a name show a contract address.
 function groupCollections(nfts) {
   const groups = new Map();
   for (const n of nfts) {
-    const key = `${n.symbol}\n${n.name}`;
-    if (!groups.has(key)) groups.set(key, { symbol: n.symbol, name: n.name, tokens: [] });
+    const key = collectionKey(n);
+    if (!groups.has(key)) groups.set(key, { symbol: n.symbol, name: n.name, classHash: n.classHash, tokens: [] });
     groups.get(key).tokens.push({ address: n.address, tokenId: n.tokenId.toString() });
   }
-  return [...groups.values()].sort((a, b) => b.tokens.length - a.tokens.length);
+  const list = [...groups.values()];
+  for (const c of list) {
+    const twins = list.filter((o) => o.symbol === c.symbol && o.name === c.name);
+    c.label = twins.length > 1 ? `${c.name} · ${shortAddress(c.tokens[0].address)}` : c.name;
+  }
+  return list.sort((a, b) => b.tokens.length - a.tokens.length);
 }
 
 function toggle(keys, on) {
@@ -340,7 +347,7 @@ function renderNfts(collections, error) {
       <span class="token-fallback">${esc(c.symbol.slice(0, 3))}</span>
       <div class="token-meta">
         <div class="sym">${esc(c.symbol)}</div>
-        <div class="nm">${esc(c.name)}</div>
+        <div class="nm">${esc(c.label)}</div>
       </div>
       <div class="token-nums">
         <div class="bal">${n}</div>

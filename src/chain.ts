@@ -41,6 +41,7 @@ export interface HeldNft {
   tokenId: bigint;
   symbol: string;
   name: string;
+  classHash: string; // contract code; same name and code means same collection
 }
 
 export interface Call {
@@ -71,31 +72,21 @@ interface RawCall {
   calldata: string[];
 }
 
-// Batches of 200 calls run in parallel. An NFT-heavy controller needs a couple
+// Batches of 200 requests run in parallel. An NFT-heavy controller needs a couple
 // of thousand owner_of calls per refresh, which one batch would serialize.
-async function rpcCalls(calls: RawCall[]): Promise<(string[] | null)[]> {
-  const out: (string[] | null)[] = new Array(calls.length).fill(null);
+async function rpcBatch(requests: { method: string; params: unknown }[]): Promise<any[]> {
+  const out: any[] = new Array(requests.length).fill(null);
   const BATCH = 200;
   const starts: number[] = [];
-  for (let i = 0; i < calls.length; i += BATCH) starts.push(i);
+  for (let i = 0; i < requests.length; i += BATCH) starts.push(i);
   await Promise.all(
     starts.map(async (start) => {
-      const chunk = calls.slice(start, start + BATCH);
+      const chunk = requests.slice(start, start + BATCH);
       try {
         const res = await fetch(RPC_URL, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(
-            chunk.map((c, j) => ({
-              jsonrpc: "2.0",
-              id: start + j,
-              method: "starknet_call",
-              params: {
-                request: { contract_address: c.to, entry_point_selector: c.selector, calldata: c.calldata },
-                block_id: "latest",
-              },
-            })),
-          ),
+          body: JSON.stringify(chunk.map((r, j) => ({ jsonrpc: "2.0", id: start + j, ...r }))),
           signal: AbortSignal.timeout(30_000),
         });
         const body = await res.json();
@@ -111,6 +102,18 @@ async function rpcCalls(calls: RawCall[]): Promise<(string[] | null)[]> {
     }),
   );
   return out;
+}
+
+function rpcCalls(calls: RawCall[]): Promise<(string[] | null)[]> {
+  return rpcBatch(
+    calls.map((c) => ({
+      method: "starknet_call",
+      params: {
+        request: { contract_address: c.to, entry_point_selector: c.selector, calldata: c.calldata },
+        block_id: "latest",
+      },
+    })),
+  );
 }
 
 export function u256Calldata(value: bigint): string[] {
@@ -285,7 +288,7 @@ export async function readToken(address: string): Promise<TokenInfo> {
 // ---------------------------------------------------------------------------
 // NFTs
 
-function shortAddress(address: string): string {
+export function shortAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
@@ -342,12 +345,19 @@ export async function getHeldNfts(address: string): Promise<HeldNft[]> {
       { to, selector: SELECTOR.name, calldata: [] },
     ]),
   );
+  const classHashes = await rpcBatch(
+    heldContracts.map((contract_address) => ({
+      method: "starknet_getClassHashAt",
+      params: { block_id: "latest", contract_address },
+    })),
+  );
   const byContract = new Map(
     heldContracts.map((c, i) => [
       c,
       {
         symbol: decodeStringResult(labels[2 * i]) ?? shortAddress(c),
         name: decodeStringResult(labels[2 * i + 1]) ?? "Unknown collection",
+        classHash: typeof classHashes[i] === "string" ? normalizeAddress(classHashes[i]) : c,
       },
     ]),
   );

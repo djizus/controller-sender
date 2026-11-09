@@ -42,8 +42,10 @@ feature map. Update them in the change that adds, moves or removes a feature.
 - Starkscan drops the high half of token ids above 128 bits (Musical Onchain Beasts use
   them). When the verified count for a contract is below its `balance_of`, the page lists
   the owner's tokens with `token_of_owner_by_index` if the contract has it.
-- Collection names and symbols come from each contract's `name()` and `symbol()`. NFTs are
-  grouped by name and symbol, since one collection can span several contracts.
+- Collection names and symbols come from each contract's `name()` and `symbol()`. One
+  collection can span several contracts, so NFTs are grouped by name, symbol and class
+  hash. Contracts with the same name but different code (the old and new Beasts) stay
+  apart, and a name shown twice carries a short contract address.
 - Cartridge's RPC answers only allowed origins. `controller.realms.party` and a browser on
   `localhost` work. `127.0.0.1`, `*.pages.dev` previews and scripts get 401.
 - NFT images come from `token_uri`. The browser decodes the metadata and shows
