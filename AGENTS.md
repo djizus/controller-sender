@@ -17,7 +17,8 @@ feature map. Update them in the change that adds, moves or removes a feature.
 - `functions/api/nfts.ts`: Starkscan transfer index for an address, cached five minutes.
   The only server code.
 - `public/index.html`, `public/style.css`: markup and styles. The design tokens copy
-  play.realms.party; fonts, logo and art load from that site. Below 820 px the layout is
+  play.realms.party; fonts, logo and art are copied into `public/assets`, never linked
+  from that site, because its file names change when it redeploys. Below 820 px the layout is
   one column and the Send card is a bottom sheet.
 - `public/_headers`: the CSP and other security headers.
 - `public/app.js`: build output, gitignored.
@@ -61,7 +62,7 @@ already at its 1.5 minimum, so the page cannot lower this.
 
 The site holds no keys and no user data. Signing happens in Cartridge's keychain iframe.
 Third-party strings are escaped before rendering. `public/_headers` sets a CSP that runs
-scripts only from the site, loads fonts only from the site and play.realms.party, frames
+scripts only from the site, loads fonts only from the site, frames
 only `x.cartridge.gg`, and forbids framing the site.
 
 ## Commands
